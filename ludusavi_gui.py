@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Ludusavi Custom Save Adder - GUI (Deep Scan + Stop‑at‑Game option)
+Ludusavi Custom Save Adder - GUI (Deep Scan + Stop‑at‑Game + Excluded Folders)
 - Deep scan: find game folders, then save folders inside them.
 - Optional: stop recursing once a game folder is found.
-- All existing features preserved.
+- Excluded folders: skip game detection but still scan inside (optional).
+- Path column editable; "Rescan Path" resolves from edited path.
 """
 
 import os
@@ -52,13 +53,20 @@ DEFAULT_PREDEFINED = [
     r"%PROGRAMDATA%\Steam\RLD!",
     r"%PROGRAMDATA%\3DMGAME",
     r"%USERPROFILE%\Documents\CPY_SAVES",
-    r"%USERPROFILE%\Saved Games"
+    r"%USERPROFILE%\Saved Games",
+    r"%PUBLIC%\Documents",              # Public Documents
+    r"%APPDATA%",                       # AppData/Roaming
+    r"%LOCALAPPDATA%",                  # AppData/Local
+    r"%LOCALAPPDATA%\Low",              # AppData/LocalLow
+    r"%USERPROFILE%\Documents",         # My Documents
 ]
 
 DEFAULT_EXCLUDE = [
     "*.ini", "*.log", "*.cache", "*.dll", "*.exe", "*.txt",
     "*.jpg", "*.png", "*.bmp", "*.cfg", "*.json", "*.bak", "*.old"
 ]
+
+DEFAULT_EXCLUDED_FOLDERS = ["steam", "uplay", "epic", "origin", "gog", "socialclub", "3dmgame", "reloaded", "skidrow", "codex", "rune", "empress", "cpy", "goldberg"]
 
 # System folders to skip when skip_system_folders is True
 SYSTEM_FOLDERS = {
@@ -188,7 +196,7 @@ class LudusaviGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Ludusavi Save Adder")
-        self.root.geometry("1250x900")  # increased height for new checkbox
+        self.root.geometry("1250x900")
         self.scan_queue = queue.Queue()
         self.scan_thread = None
         self.stop_scan = False
@@ -350,6 +358,29 @@ class LudusaviGUI:
         self.exclude_listbox.delete(0, tk.END)
         for p in self.exclude_patterns:
             self.exclude_listbox.insert(tk.END, p)
+
+    # ------------------------------------------------------------------
+    # Excluded folder names management
+    # ------------------------------------------------------------------
+    def add_excluded_folder(self):
+        name = self.excl_folder_entry.get().strip()
+        if name and name not in self.excluded_folder_names:
+            self.excluded_folder_names.append(name)
+            self.refresh_excl_folder_list()
+            self.excl_folder_entry.delete(0, tk.END)
+            log(f"Added excluded folder: {name}")
+
+    def remove_excluded_folder(self):
+        sel = self.excl_folder_listbox.curselection()
+        if sel:
+            removed = self.excluded_folder_names.pop(sel[0])
+            self.refresh_excl_folder_list()
+            log(f"Removed excluded folder: {removed}")
+
+    def refresh_excl_folder_list(self):
+        self.excl_folder_listbox.delete(0, tk.END)
+        for name in self.excluded_folder_names:
+            self.excl_folder_listbox.insert(tk.END, name)
 
     # ------------------------------------------------------------------
     # Background manifest loading with pickle cache
@@ -568,70 +599,73 @@ class LudusaviGUI:
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
 
     # ------------------------------------------------------------------
-    # Settings tab (added stop-at-game checkbox)
+    # Settings tab (compact layout)
     # ------------------------------------------------------------------
     def build_settings_tab(self):
         main_frame = ttk.Frame(self.settings_frame)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        paths_frame = ttk.LabelFrame(main_frame, text="Paths & Scan Depth")
+        paths_frame = ttk.LabelFrame(main_frame, text="Paths & Scan Settings")
         paths_frame.pack(fill=tk.X, pady=5)
         paths_frame.columnconfigure(1, weight=1)
 
+        # Row 0: ludusavi.exe
         ttk.Label(paths_frame, text="ludusavi.exe:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
         self.ludusavi_var = tk.StringVar(value=str(self.ludusavi_path))
         ttk.Entry(paths_frame, textvariable=self.ludusavi_var).grid(row=0, column=1, sticky="ew", padx=5)
         ttk.Button(paths_frame, text="Browse", command=self.browse_ludusavi).grid(row=0, column=2, padx=5)
 
+        # Row 1: config.yaml
         ttk.Label(paths_frame, text="config.yaml:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
         self.config_var = tk.StringVar(value=str(self.config_path))
         ttk.Entry(paths_frame, textvariable=self.config_var).grid(row=1, column=1, sticky="ew", padx=5)
         ttk.Button(paths_frame, text="Browse", command=self.browse_config).grid(row=1, column=2, padx=5)
 
+        # Row 2: manifest.yaml
         ttk.Label(paths_frame, text="manifest.yaml:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
         self.manifest_var = tk.StringVar(value=str(self.manifest_path))
         ttk.Entry(paths_frame, textvariable=self.manifest_var).grid(row=2, column=1, sticky="ew", padx=5)
         ttk.Button(paths_frame, text="Browse", command=self.browse_manifest).grid(row=2, column=2, padx=5)
 
-        # Standard scan depth
-        ttk.Label(paths_frame, text="Standard Scan Depth:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
+        # Row 3: Standard scan depth + spinboxes compact
+        depth_frame = ttk.Frame(paths_frame)
+        depth_frame.grid(row=3, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(depth_frame, text="Standard Depth:").pack(side=tk.LEFT, padx=(0,5))
         self.depth_var = tk.IntVar(value=self.scan_depth)
-        ttk.Spinbox(paths_frame, from_=1, to=5, textvariable=self.depth_var, width=5).grid(row=3, column=1, sticky=tk.W, padx=5)
+        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.depth_var, width=4).pack(side=tk.LEFT, padx=(0,15))
 
-        # Separator
-        ttk.Separator(paths_frame, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=3, sticky="ew", pady=5)
-
-        # Deep scan controls
-        self.deep_scan_var = tk.BooleanVar(value=self.deep_scan_enabled)
-        ttk.Checkbutton(paths_frame, text="Enable Deep Scan (find game folders, then saves)",
-                        variable=self.deep_scan_var).grid(row=5, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
-
-        ttk.Label(paths_frame, text="Game Folder Depth:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(depth_frame, text="Deep Scan Folder Depth:").pack(side=tk.LEFT, padx=(0,5))
         self.game_depth_var = tk.IntVar(value=self.game_folder_depth)
-        ttk.Spinbox(paths_frame, from_=1, to=5, textvariable=self.game_depth_var, width=5).grid(row=6, column=1, sticky=tk.W, padx=5)
+        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.game_depth_var, width=4).pack(side=tk.LEFT, padx=(0,15))
 
-        ttk.Label(paths_frame, text="Save Folder Depth:").grid(row=7, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(depth_frame, text="Save file Scan Depth:").pack(side=tk.LEFT, padx=(0,5))
         self.save_depth_var = tk.IntVar(value=self.save_folder_depth)
-        ttk.Spinbox(paths_frame, from_=1, to=5, textvariable=self.save_depth_var, width=5).grid(row=7, column=1, sticky=tk.W, padx=5)
+        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.save_depth_var, width=4).pack(side=tk.LEFT)
+
+        # Row 4: Checkboxes compact
+        check_frame = ttk.Frame(paths_frame)
+        check_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+
+        self.deep_scan_var = tk.BooleanVar(value=self.deep_scan_enabled)
+        ttk.Checkbutton(check_frame, text="Deep Scan (Recursively Through Folder)", variable=self.deep_scan_var).pack(side=tk.LEFT, padx=(0,10))
 
         self.skip_system_var = tk.BooleanVar(value=self.skip_system_folders)
-        ttk.Checkbutton(paths_frame, text="Skip System Folders (Windows, Program Files, etc.)",
-                        variable=self.skip_system_var).grid(row=8, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(check_frame, text="Skip system folders (Windows, Program Files)", variable=self.skip_system_var).pack(side=tk.LEFT, padx=(0,10))
 
-        # NEW: Stop-at-game checkbox
         self.stop_at_game_var = tk.BooleanVar(value=self.stop_at_game_folder)
-        ttk.Checkbutton(paths_frame, text="Stop at first game folder (do not scan deeper)",
-                        variable=self.stop_at_game_var).grid(row=9, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(check_frame, text="Stop Recursing at First Game Folder", variable=self.stop_at_game_var).pack(side=tk.LEFT)
 
+        # Row 5: Save & Reload buttons
         btn_frame = ttk.Frame(paths_frame)
-        btn_frame.grid(row=10, column=1, pady=10)
+        btn_frame.grid(row=5, column=1, pady=5)
         ttk.Button(btn_frame, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Reload Manifest", command=self.reload_manifest).pack(side=tk.LEFT, padx=2)
 
-        # Rest of settings (predefined locations and exclude patterns) unchanged
+        # Rest of settings: Paned window with predefined locations, exclude patterns, excluded folders
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, pady=5)
 
+        # Left: Predefined Scan Locations
         predef_frame = ttk.LabelFrame(paned, text="Predefined Scan Locations")
         paned.add(predef_frame, weight=1)
         list_frame = ttk.Frame(predef_frame)
@@ -647,7 +681,8 @@ class LudusaviGUI:
         ttk.Button(btn_frame2, text="Edit", command=self.edit_predef_dialog).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame2, text="Remove", command=self.remove_predef).pack(side=tk.LEFT, padx=2)
 
-        exclude_frame = ttk.LabelFrame(paned, text="Exclude File Patterns (wildcards)")
+        # Middle: Exclude File Patterns
+        exclude_frame = ttk.LabelFrame(paned, text="Exclude Save File Patterns (wildcards)")
         paned.add(exclude_frame, weight=1)
         excl_list_frame = ttk.Frame(exclude_frame)
         excl_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -663,8 +698,32 @@ class LudusaviGUI:
         ttk.Button(pattern_frame, text="Add Pattern", command=self.add_exclude_pattern).pack(side=tk.LEFT, padx=2)
         ttk.Button(pattern_frame, text="Remove Selected", command=self.remove_exclude_pattern).pack(side=tk.LEFT, padx=2)
 
+        # Right: Excluded Folder Names (with enable/disable checkbox)
+        excl_folder_frame = ttk.LabelFrame(paned, text="Exclude Folder Names (Skip detection, scan recursivly")
+        paned.add(excl_folder_frame, weight=1)
+
+        # Master enable/disable checkbox
+        self.exclude_folders_var = tk.BooleanVar(value=self.exclude_folders_enabled)
+        ttk.Checkbutton(excl_folder_frame, text="Enable folder exclusion (skip game detection for listed folders)",
+                        variable=self.exclude_folders_var).pack(anchor=tk.W, padx=5, pady=2)
+
+        excl_folder_list_frame = ttk.Frame(excl_folder_frame)
+        excl_folder_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.excl_folder_listbox = tk.Listbox(excl_folder_list_frame, height=8)
+        excl_folder_scroll = ttk.Scrollbar(excl_folder_list_frame, orient=tk.VERTICAL, command=self.excl_folder_listbox.yview)
+        self.excl_folder_listbox.config(yscrollcommand=excl_folder_scroll.set)
+        self.excl_folder_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        excl_folder_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        excl_btn_frame = ttk.Frame(excl_folder_frame)
+        excl_btn_frame.pack(fill=tk.X, pady=5)
+        self.excl_folder_entry = ttk.Entry(excl_btn_frame, width=30)
+        self.excl_folder_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(excl_btn_frame, text="Add", command=self.add_excluded_folder).pack(side=tk.LEFT, padx=2)
+        ttk.Button(excl_btn_frame, text="Remove", command=self.remove_excluded_folder).pack(side=tk.LEFT, padx=2)
+
         self.refresh_predef_listbox()
         self.refresh_exclude_list()
+        self.refresh_excl_folder_list()
 
     def browse_ludusavi(self):
         p = filedialog.askopenfilename(title="Select ludusavi.exe", filetypes=[("Executable", "*.exe")])
@@ -697,12 +756,15 @@ class LudusaviGUI:
         self.save_folder_depth = self.save_depth_var.get()
         self.skip_system_folders = self.skip_system_var.get()
         self.stop_at_game_folder = self.stop_at_game_var.get()
+        self.exclude_folders_enabled = self.exclude_folders_var.get()
         settings = {
             "ludusavi": str(self.ludusavi_path),
             "config": str(self.config_path),
             "manifest": str(self.manifest_path),
             "predefined_locations": self.predefined_locations,
             "exclude_patterns": self.exclude_patterns,
+            "excluded_folder_names": self.excluded_folder_names,
+            "exclude_folders_enabled": self.exclude_folders_enabled,
             "scan_depth": self.scan_depth,
             "deep_scan_enabled": self.deep_scan_enabled,
             "game_folder_depth": self.game_folder_depth,
@@ -781,15 +843,14 @@ class LudusaviGUI:
         self.tree.heading("suggest", text="Suggested")
         self.tree.heading("files", text="Sample Files")
         
-        # Set fixed widths for the first three columns (no stretching)
+        # Set column widths
         self.tree.column("check", width=40, anchor=tk.CENTER, minwidth=30, stretch=False)
-        self.tree.column("cov", width=45, anchor=tk.CENTER, minwidth=35, stretch=False)
+        self.tree.column("cov", width=48, anchor=tk.CENTER, minwidth=35, stretch=False)
         self.tree.column("valid", width=45, anchor=tk.CENTER, minwidth=35, stretch=False)
-        # Other columns will stretch (default) and have reasonable minwidths
-        self.tree.column("path", width=300, minwidth=200, stretch=True)
+        self.tree.column("path", width=350, minwidth=200, stretch=True)
         self.tree.column("name", width=170, minwidth=120, stretch=False)
         self.tree.column("suggest", width=170, minwidth=120, stretch=False)
-        self.tree.column("files", width=280, minwidth=150, stretch=True)
+        self.tree.column("files", width=350, minwidth=150, stretch=True)
 
         tree_scroll = ttk.Scrollbar(self.scan_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
@@ -802,7 +863,6 @@ class LudusaviGUI:
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self.show_context_menu)
 
-
     def on_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
         if region != "cell":
@@ -813,13 +873,8 @@ class LudusaviGUI:
             return
         idx = self.tree.index(item)
         row = self.scan_results[idx]
-        if column == "#4":   # Path column
-            path = row["path"]
-            if os.path.exists(path):
-                os.startfile(path)
-                log(f"Opened folder: {path}")
-            else:
-                messagebox.showerror("Error", f"Path not found:\n{path}")
+        if column == "#4":   # Path column – editable
+            self.edit_path_cell(item, idx)
         elif column == "#6":   # Suggest column
             sugg = row.get("suggested_name", "")
             if sugg:
@@ -829,16 +884,39 @@ class LudusaviGUI:
         elif column == "#5":   # Name column (editable)
             self.edit_name_cell(item, idx)
 
-    def edit_name_cell(self, item, idx):
-        x, y, width, height = self.tree.bbox(item, column="#5")
+    def edit_path_cell(self, item, idx):
+        """Open an entry box to edit the folder path."""
+        col = "#4"  # Path column
+        x, y, width, height = self.tree.bbox(item, column=col)
         entry = ttk.Entry(self.tree)
         entry.place(x=x, y=y, width=width, height=height)
-        current = self.tree.set(item, "#5")
+        current = self.tree.set(item, col)
+        entry.insert(0, current)
+        entry.focus()
+        def save_edit(event=None):
+            new_val = entry.get().strip()
+            if new_val:
+                self.tree.set(item, col, new_val)
+                self.scan_results[idx]["path"] = new_val
+                # Update normalized path
+                if os.path.exists(new_val):
+                    self.scan_results[idx]["normalized_path"] = normalize_path(Path(new_val))
+                log(f"Edited path to: {new_val}")
+            entry.destroy()
+        entry.bind("<Return>", save_edit)
+        entry.bind("<FocusOut>", save_edit)
+
+    def edit_name_cell(self, item, idx):
+        col = "#5"  # Name column
+        x, y, width, height = self.tree.bbox(item, column=col)
+        entry = ttk.Entry(self.tree)
+        entry.place(x=x, y=y, width=width, height=height)
+        current = self.tree.set(item, col)
         entry.insert(0, current)
         entry.focus()
         def save_edit(event=None):
             new_val = entry.get()
-            self.tree.set(item, "#5", new_val)
+            self.tree.set(item, col, new_val)
             self.scan_results[idx]["selected_name"] = new_val
             entry.destroy()
             log(f"Edited name to: {new_val}")
@@ -856,6 +934,7 @@ class LudusaviGUI:
             return
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="Rescan Selected", command=lambda: self.rescan_selected(ids=selected_iids))
+        menu.add_command(label="Rescan Path (re-resolve from edited path)", command=lambda: self.rescan_path(ids=selected_iids))
         menu.add_command(label="Copy Suggestion to Name", command=lambda: self.copy_suggested_to_selected(ids=selected_iids))
         menu.add_command(label="Add Selected", command=lambda: self.add_selected(ids=selected_iids))
         menu.add_separator()
@@ -898,6 +977,15 @@ class LudusaviGUI:
                     continue
                 if skip_system and self._is_system_folder(item.name):
                     continue
+
+                # ---- EXCLUDED FOLDER CHECK ----
+                if self.exclude_folders_enabled and self.excluded_folder_names and item.name.lower() in [x.lower() for x in self.excluded_folder_names]:
+                    log(f"  Excluded folder (skip game detection): {item.name}")
+                    # Still recurse deeper
+                    if current_depth < max_depth:
+                        results.extend(self._collect_game_folders(item, max_depth, current_depth + 1, skip_system))
+                    continue  # do not add as game, do not resolve
+
                 # Only resolve if we are at depth >= 1 (i.e., not the root)
                 if current_depth >= 1:
                     resolved_name, match_type, _ = self.resolve_game_name_extended(item.name, item)
@@ -950,7 +1038,7 @@ class LudusaviGUI:
         return False
 
     # ------------------------------------------------------------------
-    # Scanning with depth and extended matching (modified for deep scan)
+    # Scanning with depth and extended matching
     # ------------------------------------------------------------------
     def scan_predefined(self):
         if not self.predefined_locations:
@@ -1176,7 +1264,7 @@ class LudusaviGUI:
         log("Results cleared")
 
     # ------------------------------------------------------------------
-    # Actions on checked rows (respects manual edits + fuzzy)
+    # Actions on checked rows
     # ------------------------------------------------------------------
     def get_checked_indices(self):
         return [i for i, item in enumerate(self.scan_results) if item["checked"].get()]
@@ -1329,6 +1417,63 @@ class LudusaviGUI:
         self.update_status("Rescanning selected rows...")
         threading.Thread(target=worker).start()
 
+    def rescan_path(self, ids=None):
+        """
+        Resolve game name based on the edited path (not folder name).
+        Useful when the user manually changed the path.
+        """
+        indices = [self.tree.index(iid) for iid in ids] if ids else []
+        if not indices:
+            messagebox.showinfo("No Selection", "No rows selected.")
+            return
+        log(f"Rescanning path(s) for {len(indices)} selected rows")
+        def worker():
+            for idx in indices:
+                if self.stop_scan:
+                    break
+                row = self.scan_results[idx]
+                # Use the current path (may have been edited)
+                path_str = row["path"]
+                path_obj = Path(path_str)
+                log(f"  Rescanning path: {path_str}")
+                # Update normalized path
+                if path_obj.exists():
+                    row["normalized_path"] = normalize_path(path_obj)
+                # Resolve game name from the full path (not just folder name)
+                # Use the original folder name (last part) but also check the path itself
+                folder_name = path_obj.name
+                # Try extended resolution on the full path
+                resolved_name, match_type, _ = self.resolve_game_name_extended(folder_name, path_obj)
+                if resolved_name:
+                    if match_type in ("exact", "fuzzy", "path-ancestor", "parent-1", "parent-2", "parent-generic"):
+                        row["selected_name"] = resolved_name
+                        log(f"    Resolved to: {resolved_name} (match: {match_type})")
+                    else:
+                        row["suggested_name"] = resolved_name
+                        log(f"    Suggested: {resolved_name}")
+                else:
+                    # Try fuzzy on folder name
+                    sugg = self.suggest_similar_name(folder_name)
+                    if sugg:
+                        row["suggested_name"] = sugg
+                    else:
+                        row["suggested_name"] = ""
+                    log(f"    No resolution, suggested: {row['suggested_name']}")
+                # Update coverage
+                game_for_coverage = row["selected_name"] if row["selected_name"] else (row["suggested_name"] if row["suggested_name"] else row["original_name"])
+                cov_icon, _ = self.get_coverage_status(game_for_coverage, row["normalized_path"], match_type if 'match_type' in locals() else None)
+                row["coverage_icon"] = cov_icon
+                row["game_name_for_coverage"] = game_for_coverage
+                # File preview
+                preview, valid_count = get_files_preview_and_valid(Path(path_str), self.exclude_patterns, max_count=3, max_depth=2)
+                row["valid_icon"] = "✔️" if valid_count > 0 else "❌"
+                row["valid_count"] = valid_count
+                row["files_preview"] = ", ".join(preview) if preview else "(no files)"
+                self.root.after(0, lambda i=idx: self._update_tree_row(i))
+                self.update_status(f"Path resolved: {path_str} -> {row['selected_name'] or row['suggested_name'] or '?'} {cov_icon} {row['valid_icon']}")
+        self.update_status("Rescanning paths...")
+        threading.Thread(target=worker).start()
+
     def add_selected(self, ids=None):
         indices = [self.tree.index(iid) for iid in ids] if ids else []
         if not indices:
@@ -1401,6 +1546,8 @@ class LudusaviGUI:
             self.manifest_path = Path(data.get("manifest", DEFAULT_MANIFEST))
             self.predefined_locations = data.get("predefined_locations", DEFAULT_PREDEFINED)
             self.exclude_patterns = data.get("exclude_patterns", DEFAULT_EXCLUDE)
+            self.excluded_folder_names = data.get("excluded_folder_names", DEFAULT_EXCLUDED_FOLDERS)
+            self.exclude_folders_enabled = data.get("exclude_folders_enabled", True)
             self.scan_depth = data.get("scan_depth", 1)
             self.deep_scan_enabled = data.get("deep_scan_enabled", True)
             self.game_folder_depth = data.get("game_folder_depth", 3)
@@ -1414,6 +1561,8 @@ class LudusaviGUI:
             self.manifest_path = DEFAULT_MANIFEST
             self.predefined_locations = DEFAULT_PREDEFINED.copy()
             self.exclude_patterns = DEFAULT_EXCLUDE.copy()
+            self.excluded_folder_names = DEFAULT_EXCLUDED_FOLDERS.copy()
+            self.exclude_folders_enabled = True
             self.scan_depth = 1
             self.deep_scan_enabled = True
             self.game_folder_depth = 3
