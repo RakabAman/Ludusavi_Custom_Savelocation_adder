@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Ludusavi Custom Save Adder - GUI (Deep Scan + Stop‑at‑Game + Excluded Folders)
-- Deep scan: find game folders, then save folders inside them.
-- Optional: stop recursing once a game folder is found.
-- Excluded folders: skip game detection but still scan inside (optional).
-- Path column editable; "Rescan Path" resolves from edited path.
+Ludusavi Custom Save Adder - GUI (Live Settings, Unified Rescan, Sample Count)
+- All settings take effect immediately.
+- Rescan Selected re-evaluates both name and path.
+- Sample Files count adjustable.
+- Toggle file exclusions on/off inside their respective frames.
 """
 
 import os
@@ -54,11 +54,11 @@ DEFAULT_PREDEFINED = [
     r"%PROGRAMDATA%\3DMGAME",
     r"%USERPROFILE%\Documents\CPY_SAVES",
     r"%USERPROFILE%\Saved Games",
-    r"%PUBLIC%\Documents",              # Public Documents
-    r"%APPDATA%",                       # AppData/Roaming
-    r"%LOCALAPPDATA%",                  # AppData/Local
-    r"%LOCALAPPDATA%\Low",              # AppData/LocalLow
-    r"%USERPROFILE%\Documents",         # My Documents
+    r"%PUBLIC%\Documents",
+    r"%APPDATA%",
+    r"%LOCALAPPDATA%",
+    r"%LOCALAPPDATA%\Low",
+    r"%USERPROFILE%\Documents",
 ]
 
 DEFAULT_EXCLUDE = [
@@ -163,7 +163,7 @@ def add_custom_game(config_path, game_name, normalized_path, merge=True):
     log(f"  Saved to {config_path}")
     return True
 
-def get_files_preview_and_valid(folder_path: Path, exclude_patterns, max_count=3, max_depth=2):
+def get_files_preview_and_valid(folder_path: Path, exclude_patterns, max_count=3, max_depth=2, exclude_enabled=True):
     preview = []
     valid_count = 0
     base_depth = len(folder_path.parts)
@@ -175,10 +175,11 @@ def get_files_preview_and_valid(folder_path: Path, exclude_patterns, max_count=3
                 if depth <= max_depth:
                     rel_str = str(rel)
                     excluded = False
-                    for pattern in exclude_patterns:
-                        if fnmatch.fnmatch(rel_str, pattern) or fnmatch.fnmatch(item.name, pattern):
-                            excluded = True
-                            break
+                    if exclude_enabled:
+                        for pattern in exclude_patterns:
+                            if fnmatch.fnmatch(rel_str, pattern) or fnmatch.fnmatch(item.name, pattern):
+                                excluded = True
+                                break
                     if not excluded:
                         valid_count += 1
                         if len(preview) < max_count:
@@ -196,7 +197,7 @@ class LudusaviGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Ludusavi Save Adder")
-        self.root.geometry("1250x900")
+        self.root.geometry("1250x920")
         self.scan_queue = queue.Queue()
         self.scan_thread = None
         self.stop_scan = False
@@ -227,6 +228,9 @@ class LudusaviGUI:
             log(f"Command-line auto-scan: {folder}")
             self.root.after(500, lambda: self.scan_custom_folder(folder))
 
+    # ------------------------------------------------------------------
+    # Status bar
+    # ------------------------------------------------------------------
     def build_status_bar(self, parent):
         status_frame = ttk.Frame(parent)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=5, pady=2)
@@ -344,8 +348,6 @@ class LudusaviGUI:
             self.refresh_exclude_list()
             self.exclude_entry.delete(0, tk.END)
             log(f"Added exclude pattern: {pattern}")
-        elif pattern in self.exclude_patterns:
-            log(f"Pattern {pattern} already exists")
 
     def remove_exclude_pattern(self):
         sel = self.exclude_listbox.curselection()
@@ -381,6 +383,83 @@ class LudusaviGUI:
         self.excl_folder_listbox.delete(0, tk.END)
         for name in self.excluded_folder_names:
             self.excl_folder_listbox.insert(tk.END, name)
+
+    # ------------------------------------------------------------------
+    # Predefined locations management
+    # ------------------------------------------------------------------
+    def add_predef_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Predefined Location")
+        dialog.geometry("550x120")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        ttk.Label(dialog, text="Enter path (can use %APPDATA%, %USERPROFILE%, etc.):").pack(padx=5, pady=5)
+        entry = ttk.Entry(dialog, width=70)
+        entry.pack(padx=5, pady=5)
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=5)
+        def browse():
+            folder = filedialog.askdirectory(title="Select folder")
+            if folder:
+                converted = self.to_env_path(folder)
+                entry.delete(0, tk.END)
+                entry.insert(0, converted)
+        ttk.Button(btn_frame, text="Browse", command=browse).pack(side=tk.LEFT, padx=5)
+        def add():
+            path = entry.get().strip()
+            if path:
+                self.predefined_locations.append(path)
+                self.refresh_predef_listbox()
+                log(f"Added predefined location: {path}")
+                dialog.destroy()
+        ttk.Button(btn_frame, text="Add", command=add).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+    def edit_predef_dialog(self):
+        sel = self.predef_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        old_path = self.predefined_locations[idx]
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Predefined Location")
+        dialog.geometry("550x120")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        ttk.Label(dialog, text="Edit path (can use %APPDATA%, %USERPROFILE%, etc.):").pack(padx=5, pady=5)
+        entry = ttk.Entry(dialog, width=70)
+        entry.insert(0, old_path)
+        entry.pack(padx=5, pady=5)
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=5)
+        def browse():
+            folder = filedialog.askdirectory(title="Select folder", initialdir=old_path)
+            if folder:
+                converted = self.to_env_path(folder)
+                entry.delete(0, tk.END)
+                entry.insert(0, converted)
+        ttk.Button(btn_frame, text="Browse", command=browse).pack(side=tk.LEFT, padx=5)
+        def save():
+            new_path = entry.get().strip()
+            if new_path:
+                self.predefined_locations[idx] = new_path
+                self.refresh_predef_listbox()
+                log(f"Edited location: {old_path} -> {new_path}")
+                dialog.destroy()
+        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+    def remove_predef(self):
+        sel = self.predef_listbox.curselection()
+        if sel:
+            removed = self.predefined_locations.pop(sel[0])
+            self.refresh_predef_listbox()
+            log(f"Removed predefined location: {removed}")
+
+    def refresh_predef_listbox(self):
+        self.predef_listbox.delete(0, tk.END)
+        for loc in self.predefined_locations:
+            self.predef_listbox.insert(tk.END, loc)
 
     # ------------------------------------------------------------------
     # Background manifest loading with pickle cache
@@ -534,72 +613,7 @@ class LudusaviGUI:
             messagebox.showerror("Error", f"ludusavi.exe not found at:\n{self.ludusavi_path}")
 
     # ------------------------------------------------------------------
-    # Custom dialogs for predefined locations
-    # ------------------------------------------------------------------
-    def add_predef_dialog(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Add Predefined Location")
-        dialog.geometry("550x120")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        ttk.Label(dialog, text="Enter path (can use %APPDATA%, %USERPROFILE%, etc.):").pack(padx=5, pady=5)
-        entry = ttk.Entry(dialog, width=70)
-        entry.pack(padx=5, pady=5)
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(pady=5)
-        def browse():
-            folder = filedialog.askdirectory(title="Select folder")
-            if folder:
-                converted = self.to_env_path(folder)
-                entry.delete(0, tk.END)
-                entry.insert(0, converted)
-        ttk.Button(btn_frame, text="Browse", command=browse).pack(side=tk.LEFT, padx=5)
-        def add():
-            path = entry.get().strip()
-            if path:
-                self.predefined_locations.append(path)
-                self.refresh_predef_listbox()
-                log(f"Added predefined location: {path}")
-                dialog.destroy()
-        ttk.Button(btn_frame, text="Add", command=add).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-
-    def edit_predef_dialog(self):
-        sel = self.predef_listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        old_path = self.predefined_locations[idx]
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Edit Predefined Location")
-        dialog.geometry("550x120")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        ttk.Label(dialog, text="Edit path (can use %APPDATA%, %USERPROFILE%, etc.):").pack(padx=5, pady=5)
-        entry = ttk.Entry(dialog, width=70)
-        entry.insert(0, old_path)
-        entry.pack(padx=5, pady=5)
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(pady=5)
-        def browse():
-            folder = filedialog.askdirectory(title="Select folder", initialdir=old_path)
-            if folder:
-                converted = self.to_env_path(folder)
-                entry.delete(0, tk.END)
-                entry.insert(0, converted)
-        ttk.Button(btn_frame, text="Browse", command=browse).pack(side=tk.LEFT, padx=5)
-        def save():
-            new_path = entry.get().strip()
-            if new_path:
-                self.predefined_locations[idx] = new_path
-                self.refresh_predef_listbox()
-                log(f"Edited location: {old_path} -> {new_path}")
-                dialog.destroy()
-        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-
-    # ------------------------------------------------------------------
-    # Settings tab (compact layout)
+    # Settings tab (live binding, checkboxes inside frames)
     # ------------------------------------------------------------------
     def build_settings_tab(self):
         main_frame = ttk.Frame(self.settings_frame)
@@ -627,33 +641,31 @@ class LudusaviGUI:
         ttk.Entry(paths_frame, textvariable=self.manifest_var).grid(row=2, column=1, sticky="ew", padx=5)
         ttk.Button(paths_frame, text="Browse", command=self.browse_manifest).grid(row=2, column=2, padx=5)
 
-        # Row 3: Standard scan depth + spinboxes compact
+        # Row 3: Spinboxes (live)
         depth_frame = ttk.Frame(paths_frame)
         depth_frame.grid(row=3, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+
         ttk.Label(depth_frame, text="Standard Depth:").pack(side=tk.LEFT, padx=(0,5))
-        self.depth_var = tk.IntVar(value=self.scan_depth)
-        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.depth_var, width=4).pack(side=tk.LEFT, padx=(0,15))
+        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.scan_depth, width=4).pack(side=tk.LEFT, padx=(0,15))
 
-        ttk.Label(depth_frame, text="Deep Scan Folder Depth:").pack(side=tk.LEFT, padx=(0,5))
-        self.game_depth_var = tk.IntVar(value=self.game_folder_depth)
-        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.game_depth_var, width=4).pack(side=tk.LEFT, padx=(0,15))
+        ttk.Label(depth_frame, text="Game Folder Depth:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.game_folder_depth, width=4).pack(side=tk.LEFT, padx=(0,15))
 
-        ttk.Label(depth_frame, text="Save file Scan Depth:").pack(side=tk.LEFT, padx=(0,5))
-        self.save_depth_var = tk.IntVar(value=self.save_folder_depth)
-        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.save_depth_var, width=4).pack(side=tk.LEFT)
+        ttk.Label(depth_frame, text="Save Folder Depth:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Spinbox(depth_frame, from_=1, to=5, textvariable=self.save_folder_depth, width=4).pack(side=tk.LEFT)
 
-        # Row 4: Checkboxes compact
+        ttk.Label(depth_frame, text="Sample Files:").pack(side=tk.LEFT, padx=(10,5))
+        ttk.Spinbox(depth_frame, from_=1, to=10, textvariable=self.sample_count, width=4).pack(side=tk.LEFT)
+
+        # Row 4: Checkboxes (live)
         check_frame = ttk.Frame(paths_frame)
         check_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
 
-        self.deep_scan_var = tk.BooleanVar(value=self.deep_scan_enabled)
-        ttk.Checkbutton(check_frame, text="Deep Scan (Recursively Through Folder)", variable=self.deep_scan_var).pack(side=tk.LEFT, padx=(0,10))
+        ttk.Checkbutton(check_frame, text="Deep Scan (Recursively Through Folder)", variable=self.deep_scan_enabled).pack(side=tk.LEFT, padx=(0,10))
 
-        self.skip_system_var = tk.BooleanVar(value=self.skip_system_folders)
-        ttk.Checkbutton(check_frame, text="Skip system folders (Windows, Program Files)", variable=self.skip_system_var).pack(side=tk.LEFT, padx=(0,10))
+        ttk.Checkbutton(check_frame, text="Skip system folders (Windows, Program Files)", variable=self.skip_system_folders).pack(side=tk.LEFT, padx=(0,10))
 
-        self.stop_at_game_var = tk.BooleanVar(value=self.stop_at_game_folder)
-        ttk.Checkbutton(check_frame, text="Stop Recursing at First Game Folder", variable=self.stop_at_game_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(check_frame, text="Stop Recursing at First Game Folder", variable=self.stop_at_game_folder).pack(side=tk.LEFT)
 
         # Row 5: Save & Reload buttons
         btn_frame = ttk.Frame(paths_frame)
@@ -681,9 +693,14 @@ class LudusaviGUI:
         ttk.Button(btn_frame2, text="Edit", command=self.edit_predef_dialog).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame2, text="Remove", command=self.remove_predef).pack(side=tk.LEFT, padx=2)
 
-        # Middle: Exclude File Patterns
+        # Middle: Exclude File Patterns (with enable checkbox inside frame)
         exclude_frame = ttk.LabelFrame(paned, text="Exclude Save File Patterns (wildcards)")
         paned.add(exclude_frame, weight=1)
+
+        # Enable/disable checkbox for file exclusions (inside this frame)
+        # NO REASSIGNMENT – use existing variable
+        ttk.Checkbutton(exclude_frame, text="Enable file exclusions", variable=self.exclude_patterns_enabled).pack(anchor=tk.W, padx=5, pady=2)
+
         excl_list_frame = ttk.Frame(exclude_frame)
         excl_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.exclude_listbox = tk.Listbox(excl_list_frame, height=8)
@@ -695,17 +712,16 @@ class LudusaviGUI:
         pattern_frame.pack(fill=tk.X, pady=5)
         self.exclude_entry = ttk.Entry(pattern_frame, width=30)
         self.exclude_entry.pack(side=tk.LEFT, padx=5)
-        ttk.Button(pattern_frame, text="Add Pattern", command=self.add_exclude_pattern).pack(side=tk.LEFT, padx=2)
-        ttk.Button(pattern_frame, text="Remove Selected", command=self.remove_exclude_pattern).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pattern_frame, text="Add", command=self.add_exclude_pattern).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pattern_frame, text="Remove", command=self.remove_exclude_pattern).pack(side=tk.LEFT, padx=2)
 
-        # Right: Excluded Folder Names (with enable/disable checkbox)
-        excl_folder_frame = ttk.LabelFrame(paned, text="Exclude Folder Names (Skip detection, scan recursivly")
+        # Right: Excluded Folder Names (with enable checkbox inside frame)
+        excl_folder_frame = ttk.LabelFrame(paned, text="Exclude Folder Names (Skip detection, scan recursively)")
         paned.add(excl_folder_frame, weight=1)
 
-        # Master enable/disable checkbox
-        self.exclude_folders_var = tk.BooleanVar(value=self.exclude_folders_enabled)
-        ttk.Checkbutton(excl_folder_frame, text="Enable folder exclusion (skip game detection for listed folders)",
-                        variable=self.exclude_folders_var).pack(anchor=tk.W, padx=5, pady=2)
+        # Enable/disable checkbox for folder exclusions (inside this frame)
+        # NO REASSIGNMENT – use existing variable
+        ttk.Checkbutton(excl_folder_frame, text="Enable folder exclusions", variable=self.exclude_folders_enabled).pack(anchor=tk.W, padx=5, pady=2)
 
         excl_folder_list_frame = ttk.Frame(excl_folder_frame)
         excl_folder_list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -747,38 +763,29 @@ class LudusaviGUI:
             log(f"Set manifest.yaml to {p}")
 
     def save_settings(self):
-        self.ludusavi_path = Path(self.ludusavi_var.get())
-        self.config_path = Path(self.config_var.get())
-        self.manifest_path = Path(self.manifest_var.get())
-        self.scan_depth = self.depth_var.get()
-        self.deep_scan_enabled = self.deep_scan_var.get()
-        self.game_folder_depth = self.game_depth_var.get()
-        self.save_folder_depth = self.save_depth_var.get()
-        self.skip_system_folders = self.skip_system_var.get()
-        self.stop_at_game_folder = self.stop_at_game_var.get()
-        self.exclude_folders_enabled = self.exclude_folders_var.get()
         settings = {
-            "ludusavi": str(self.ludusavi_path),
-            "config": str(self.config_path),
-            "manifest": str(self.manifest_path),
+            "ludusavi": self.ludusavi_var.get(),
+            "config": self.config_var.get(),
+            "manifest": self.manifest_var.get(),
             "predefined_locations": self.predefined_locations,
             "exclude_patterns": self.exclude_patterns,
             "excluded_folder_names": self.excluded_folder_names,
-            "exclude_folders_enabled": self.exclude_folders_enabled,
-            "scan_depth": self.scan_depth,
-            "deep_scan_enabled": self.deep_scan_enabled,
-            "game_folder_depth": self.game_folder_depth,
-            "save_folder_depth": self.save_folder_depth,
-            "skip_system_folders": self.skip_system_folders,
-            "stop_at_game_folder": self.stop_at_game_folder
+            "exclude_folders_enabled": self.exclude_folders_enabled.get(),
+            "exclude_patterns_enabled": self.exclude_patterns_enabled.get(),
+            "scan_depth": self.scan_depth.get(),
+            "deep_scan_enabled": self.deep_scan_enabled.get(),
+            "game_folder_depth": self.game_folder_depth.get(),
+            "save_folder_depth": self.save_folder_depth.get(),
+            "sample_count": self.sample_count.get(),
+            "skip_system_folders": self.skip_system_folders.get(),
+            "stop_at_game_folder": self.stop_at_game_folder.get()
         }
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
         log(f"Settings saved to {SETTINGS_FILE}")
-        self.manifest_loaded = False
-        self.manifest_data = None
-        self.start_background_manifest_load()
-        self.load_custom_config()
+        self.ludusavi_path = Path(self.ludusavi_var.get())
+        self.config_path = Path(self.config_var.get())
+        self.manifest_path = Path(self.manifest_var.get())
         messagebox.showinfo("Settings", "Settings saved.")
 
     def reload_manifest(self):
@@ -791,18 +798,9 @@ class LudusaviGUI:
         self.start_background_manifest_load()
         self.update_status("Reloading manifest...")
 
-    def remove_predef(self):
-        sel = self.predef_listbox.curselection()
-        if sel:
-            removed = self.predefined_locations.pop(sel[0])
-            self.refresh_predef_listbox()
-            log(f"Removed predefined location: {removed}")
-
-    def refresh_predef_listbox(self):
-        self.predef_listbox.delete(0, tk.END)
-        for loc in self.predefined_locations:
-            self.predef_listbox.insert(tk.END, loc)
-
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
     def to_env_path(self, abs_path: str) -> str:
         abs_path = os.path.normpath(abs_path)
         env_mappings = [
@@ -830,8 +828,8 @@ class LudusaviGUI:
         ttk.Button(toolbar, text="Clear", command=self.clear_results).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Launch Ludusavi", command=self.launch_ludusavi).pack(side=tk.LEFT, padx=2)
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=2)
-        ttk.Button(toolbar, text="Rescan Checked", command=self.rescan_checked).pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Add Checked", command=self.add_checked).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Rescan Selected", command=self.rescan_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="Add Selected to Ludusavi", command=self.add_selected).pack(side=tk.LEFT, padx=2)
 
         columns = ("check", "cov", "valid", "path", "name", "suggest", "files")
         self.tree = ttk.Treeview(self.scan_frame, columns=columns, show="headings", height=12)
@@ -843,13 +841,12 @@ class LudusaviGUI:
         self.tree.heading("suggest", text="Suggested")
         self.tree.heading("files", text="Sample Files")
         
-        # Set column widths
         self.tree.column("check", width=40, anchor=tk.CENTER, minwidth=30, stretch=False)
         self.tree.column("cov", width=48, anchor=tk.CENTER, minwidth=35, stretch=False)
         self.tree.column("valid", width=45, anchor=tk.CENTER, minwidth=35, stretch=False)
         self.tree.column("path", width=350, minwidth=200, stretch=True)
-        self.tree.column("name", width=170, minwidth=120, stretch=False)
-        self.tree.column("suggest", width=170, minwidth=120, stretch=False)
+        self.tree.column("name", width=130, minwidth=120, stretch=False)
+        self.tree.column("suggest", width=130, minwidth=120, stretch=False)
         self.tree.column("files", width=350, minwidth=150, stretch=True)
 
         tree_scroll = ttk.Scrollbar(self.scan_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -863,6 +860,9 @@ class LudusaviGUI:
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self.show_context_menu)
 
+    # ------------------------------------------------------------------
+    # Treeview interactions
+    # ------------------------------------------------------------------
     def on_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
         if region != "cell":
@@ -885,8 +885,7 @@ class LudusaviGUI:
             self.edit_name_cell(item, idx)
 
     def edit_path_cell(self, item, idx):
-        """Open an entry box to edit the folder path."""
-        col = "#4"  # Path column
+        col = "#4"
         x, y, width, height = self.tree.bbox(item, column=col)
         entry = ttk.Entry(self.tree)
         entry.place(x=x, y=y, width=width, height=height)
@@ -898,7 +897,6 @@ class LudusaviGUI:
             if new_val:
                 self.tree.set(item, col, new_val)
                 self.scan_results[idx]["path"] = new_val
-                # Update normalized path
                 if os.path.exists(new_val):
                     self.scan_results[idx]["normalized_path"] = normalize_path(Path(new_val))
                 log(f"Edited path to: {new_val}")
@@ -907,7 +905,7 @@ class LudusaviGUI:
         entry.bind("<FocusOut>", save_edit)
 
     def edit_name_cell(self, item, idx):
-        col = "#5"  # Name column
+        col = "#5"
         x, y, width, height = self.tree.bbox(item, column=col)
         entry = ttk.Entry(self.tree)
         entry.place(x=x, y=y, width=width, height=height)
@@ -933,12 +931,11 @@ class LudusaviGUI:
         if not selected_iids:
             return
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Rescan Selected", command=lambda: self.rescan_selected(ids=selected_iids))
-        menu.add_command(label="Rescan Path (re-resolve from edited path)", command=lambda: self.rescan_path(ids=selected_iids))
-        menu.add_command(label="Copy Suggestion to Name", command=lambda: self.copy_suggested_to_selected(ids=selected_iids))
-        menu.add_command(label="Add Selected", command=lambda: self.add_selected(ids=selected_iids))
-        menu.add_separator()
         menu.add_command(label="Open Folder", command=lambda: self.open_folder(selected_iids))
+        menu.add_separator()
+        menu.add_command(label="Rescan Selected", command=lambda: self.rescan_selected(ids=selected_iids))
+        menu.add_command(label="Copy Suggestion to Name", command=lambda: self.copy_suggested_to_selected(ids=selected_iids))
+        menu.add_command(label="Add Selected to Ludusavi", command=lambda: self.add_selected(ids=selected_iids))
         menu.post(event.x_root, event.y_root)
 
     def on_drop(self, event):
@@ -970,75 +967,82 @@ class LudusaviGUI:
     def _collect_game_folders(self, root_path: Path, max_depth: int, current_depth: int, skip_system: bool):
         if current_depth > max_depth:
             return []
+        if self.stop_scan:   # <-- new check
+            return []
         results = []
         try:
             for item in root_path.iterdir():
+                if self.stop_scan:
+                    break
                 if not item.is_dir():
                     continue
                 if skip_system and self._is_system_folder(item.name):
                     continue
 
-                # ---- EXCLUDED FOLDER CHECK ----
-                if self.exclude_folders_enabled and self.excluded_folder_names and item.name.lower() in [x.lower() for x in self.excluded_folder_names]:
+                if self.exclude_folders_enabled.get() and self.excluded_folder_names and item.name.lower() in [x.lower() for x in self.excluded_folder_names]:
                     log(f"  Excluded folder (skip game detection): {item.name}")
-                    # Still recurse deeper
                     if current_depth < max_depth:
                         results.extend(self._collect_game_folders(item, max_depth, current_depth + 1, skip_system))
-                    continue  # do not add as game, do not resolve
+                    continue
 
-                # Only resolve if we are at depth >= 1 (i.e., not the root)
                 if current_depth >= 1:
                     resolved_name, match_type, _ = self.resolve_game_name_extended(item.name, item)
                 else:
                     resolved_name = None
                     match_type = None
-                # Only accept exact, fuzzy, or path-ancestor as game folder matches
                 if resolved_name and match_type in ("exact", "fuzzy", "path-ancestor"):
                     results.append((item, resolved_name, match_type))
-                    if self.stop_at_game_folder:
-                        continue  # don't recurse into this folder
-                # Always recurse deeper (unless max depth reached)
+                    if self.stop_at_game_folder.get():
+                        continue
                 if current_depth < max_depth:
                     results.extend(self._collect_game_folders(item, max_depth, current_depth + 1, skip_system))
         except PermissionError:
             pass
         return results
 
-    def _collect_save_folders(self, game_folder: Path, max_depth: int, current_depth: int, exclude_patterns):
+    def _collect_save_folders(self, game_folder: Path, max_depth: int, current_depth: int, exclude_patterns, exclude_enabled):
         if current_depth > max_depth:
+            return []
+        if self.stop_scan:   # <-- new check
             return []
         results = []
         try:
-            # Only add this folder if it has valid files directly inside it
-            if self._has_valid_files_directly(game_folder, exclude_patterns):
-                preview, valid_count = get_files_preview_and_valid(game_folder, exclude_patterns, max_count=3, max_depth=2)
+            if self._has_valid_files_directly(game_folder, exclude_patterns, exclude_enabled):
+                preview, valid_count = get_files_preview_and_valid(game_folder, exclude_patterns,
+                                                                   max_count=self.sample_count.get(),
+                                                                   max_depth=2,
+                                                                   exclude_enabled=exclude_enabled)
                 results.append((game_folder, valid_count, preview))
-            # Recurse into subfolders
             for item in game_folder.iterdir():
+                if self.stop_scan:
+                    break
                 if item.is_dir():
-                    results.extend(self._collect_save_folders(item, max_depth, current_depth + 1, exclude_patterns))
+                    results.extend(self._collect_save_folders(item, max_depth, current_depth + 1, exclude_patterns, exclude_enabled))
         except PermissionError:
             pass
         return results
 
-    def _has_valid_files_directly(self, folder_path: Path, exclude_patterns) -> bool:
-        """Return True if folder contains at least one non‑excluded file directly inside it."""
+
+    def _has_valid_files_directly(self, folder_path: Path, exclude_patterns, exclude_enabled) -> bool:
         try:
             for item in folder_path.iterdir():
                 if item.is_file():
-                    excluded = False
-                    for pattern in exclude_patterns:
-                        if fnmatch.fnmatch(item.name, pattern):
-                            excluded = True
-                            break
-                    if not excluded:
+                    if exclude_enabled:
+                        excluded = False
+                        for pattern in exclude_patterns:
+                            if fnmatch.fnmatch(item.name, pattern):
+                                excluded = True
+                                break
+                        if not excluded:
+                            return True
+                    else:
                         return True
         except PermissionError:
             pass
         return False
 
     # ------------------------------------------------------------------
-    # Scanning with depth and extended matching
+    # Scanning
     # ------------------------------------------------------------------
     def scan_predefined(self):
         if not self.predefined_locations:
@@ -1067,10 +1071,10 @@ class LudusaviGUI:
         self.update_status("Preparing scan...")
         self.ensure_manifest_ready()
         self.load_custom_config()
-        if self.deep_scan_enabled:
-            log(f"Starting deep scan worker for {len(root_folders)} root(s), game_depth={self.game_folder_depth}, save_depth={self.save_folder_depth}, stop_at_game={self.stop_at_game_folder}")
+        if self.deep_scan_enabled.get():
+            log(f"Starting deep scan worker for {len(root_folders)} root(s), game_depth={self.game_folder_depth.get()}, save_depth={self.save_folder_depth.get()}, stop_at_game={self.stop_at_game_folder.get()}")
         else:
-            log(f"Starting standard scan worker for {len(root_folders)} root(s), depth={self.scan_depth}")
+            log(f"Starting standard scan worker for {len(root_folders)} root(s), depth={self.scan_depth.get()}")
         self.scan_thread = threading.Thread(target=self._scan_worker, args=(root_folders,))
         self.scan_thread.start()
         self.root.after(100, self._poll_scan_queue)
@@ -1079,6 +1083,7 @@ class LudusaviGUI:
         total_roots = len(root_folders)
         log(f"Scan worker started, {total_roots} root folders")
         for r_idx, root in enumerate(root_folders):
+            # CHECK STOP FLAG AT THE START OF EACH ROOT
             if self.stop_scan:
                 log("Scan stopped by user")
                 break
@@ -1091,19 +1096,23 @@ class LudusaviGUI:
                 continue
             self.update_status(f"Scanning: {root_path}")
 
-            if self.deep_scan_enabled:
+            exclude_enabled = self.exclude_patterns_enabled.get()
+            if self.deep_scan_enabled.get():
                 # ---- DEEP SCAN ----
                 log("  Using deep scan")
-                game_folders = self._collect_game_folders(root_path, self.game_folder_depth, 1, self.skip_system_folders)
+                game_folders = self._collect_game_folders(root_path, self.game_folder_depth.get(), 1, self.skip_system_folders.get())
                 log(f"  Found {len(game_folders)} game folder candidates")
                 for game_folder, game_name, match_type in game_folders:
                     if self.stop_scan:
+                        log("Scan stopped by user")
                         break
                     log(f"    Scanning saves in: {game_folder} (game: {game_name})")
-                    save_folders = self._collect_save_folders(game_folder, self.save_folder_depth, 1, self.exclude_patterns)
+                    save_folders = self._collect_save_folders(game_folder, self.save_folder_depth.get(), 1, self.exclude_patterns, exclude_enabled)
                     if not save_folders:
-                        # No save folder found with valid files; optionally add the game folder itself
-                        preview, valid_count = get_files_preview_and_valid(game_folder, self.exclude_patterns, max_count=3, max_depth=2)
+                        preview, valid_count = get_files_preview_and_valid(game_folder, self.exclude_patterns,
+                                                                           max_count=self.sample_count.get(),
+                                                                           max_depth=2,
+                                                                           exclude_enabled=exclude_enabled)
                         if valid_count > 0:
                             save_folders = [(game_folder, valid_count, preview)]
                         else:
@@ -1111,6 +1120,7 @@ class LudusaviGUI:
                             continue
                     for save_folder, valid_count, preview in save_folders:
                         if self.stop_scan:
+                            log("Scan stopped by user")
                             break
                         norm_path = normalize_path(save_folder)
                         cov_icon, _ = self.get_coverage_status(game_name, norm_path, match_type)
@@ -1136,11 +1146,13 @@ class LudusaviGUI:
                 progress = (r_idx + 1) / total_roots * 100
                 self.scan_queue.put(("progress", progress))
             else:
-                # ---- STANDARD SCAN (old logic) ----
-                candidates = self._collect_dirs_at_depth(root_path, self.scan_depth)
-                log(f"  Found {len(candidates)} directories at depth {self.scan_depth}")
+                # ---- STANDARD SCAN ----
+                candidates = self._collect_dirs_at_depth(root_path, self.scan_depth.get())
+                log(f"  Found {len(candidates)} directories at depth {self.scan_depth.get()}")
                 for sub in candidates:
+                    # CHECK STOP FLAG BEFORE PROCESSING EACH SUBFOLDER
                     if self.stop_scan:
+                        log("Scan stopped by user")
                         break
                     orig = sub.name
                     log(f"  Checking folder: {orig} (path: {sub})")
@@ -1157,7 +1169,10 @@ class LudusaviGUI:
                     norm_path = normalize_path(sub)
                     game_for_coverage = exact if exact else (sugg if sugg else orig)
                     cov_icon, _ = self.get_coverage_status(game_for_coverage, norm_path, match_type)
-                    preview, valid_count = get_files_preview_and_valid(sub, self.exclude_patterns, max_count=3, max_depth=2)
+                    preview, valid_count = get_files_preview_and_valid(sub, self.exclude_patterns,
+                                                                       max_count=self.sample_count.get(),
+                                                                       max_depth=2,
+                                                                       exclude_enabled=exclude_enabled)
                     preview_str = ", ".join(preview) if preview else "(no files)"
                     valid_icon = "✔️" if valid_count > 0 else "❌"
                     self.scan_results.append({
@@ -1264,151 +1279,78 @@ class LudusaviGUI:
         log("Results cleared")
 
     # ------------------------------------------------------------------
-    # Actions on checked rows
-    # ------------------------------------------------------------------
-    def get_checked_indices(self):
-        return [i for i, item in enumerate(self.scan_results) if item["checked"].get()]
-
-    def rescan_checked(self):
-        indices = self.get_checked_indices()
-        if not indices:
-            messagebox.showinfo("No Selection", "No rows checked.")
-            return
-        log(f"Rescanning {len(indices)} checked rows")
-        def worker():
-            for idx in indices:
-                if self.stop_scan:
-                    break
-                row = self.scan_results[idx]
-                log(f"  Rescanning {row['original_name']} (path: {row['path']})")
-                if row["selected_name"].strip():
-                    name_to_resolve = row["selected_name"].strip()
-                    official = self.resolve_edited_name(name_to_resolve)
-                    if official:
-                        row["selected_name"] = official
-                        log(f"    User name resolved to official: {official}")
-                    else:
-                        log(f"    User name '{name_to_resolve}' not found in manifest, keeping as custom")
-                    sugg = self.suggest_similar_name(row["original_name"])
-                    row["suggested_name"] = sugg if sugg else ""
-                else:
-                    resolved_name, match_type, _ = self.resolve_game_name_extended(row["original_name"], Path(row["path"]))
-                    if resolved_name:
-                        if match_type in ("exact", "fuzzy", "path-ancestor", "parent-1", "parent-2", "parent-generic"):
-                            row["selected_name"] = resolved_name
-                            log(f"    Auto-resolved to: {resolved_name} (match: {match_type})")
-                        else:
-                            row["suggested_name"] = resolved_name
-                            log(f"    Auto-suggested: {resolved_name}")
-                    else:
-                        sugg = self.suggest_similar_name(row["original_name"])
-                        row["suggested_name"] = sugg if sugg else ""
-                        log(f"    No auto-resolution, suggested: {row['suggested_name']}")
-                game_for_coverage = row["selected_name"] if row["selected_name"] else (row["suggested_name"] if row["suggested_name"] else row["original_name"])
-                cov_icon, _ = self.get_coverage_status(game_for_coverage, row["normalized_path"], match_type if 'match_type' in locals() else None)
-                row["coverage_icon"] = cov_icon
-                row["game_name_for_coverage"] = game_for_coverage
-                preview, valid_count = get_files_preview_and_valid(Path(row["path"]), self.exclude_patterns, max_count=3, max_depth=2)
-                row["valid_icon"] = "✔️" if valid_count > 0 else "❌"
-                row["valid_count"] = valid_count
-                row["files_preview"] = ", ".join(preview) if preview else "(no files)"
-                self.root.after(0, lambda i=idx: self._update_tree_row(i))
-                self.update_status(f"Resolved: {row['original_name']} -> {row['selected_name'] or row['suggested_name'] or '?'} {cov_icon} {row['valid_icon']}")
-        self.update_status("Rescanning checked rows...")
-        threading.Thread(target=worker).start()
-
-    def add_checked(self):
-        indices = self.get_checked_indices()
-        if not indices:
-            messagebox.showinfo("No Selection", "No rows checked.")
-            return
-        to_add = []
-        skipped_covered = 0
-        skipped_invalid = 0
-        for idx in indices:
-            row = self.scan_results[idx]
-            if row["coverage_icon"] == "✅":
-                if not messagebox.askyesno("Already Covered", f"Folder '{row['original_name']}' is already covered.\nAdd anyway?"):
-                    skipped_covered += 1
-                    continue
-            if row["valid_icon"] == "❌":
-                if not messagebox.askyesno("No Valid Files", f"Folder '{row['original_name']}' has no valid files (after exclusions).\nAdd anyway?"):
-                    skipped_invalid += 1
-                    continue
-            name = row["selected_name"].strip()
-            if not name:
-                if not messagebox.askyesno("Missing Name", f"Folder '{row['original_name']}' has no name. Use folder name?"):
-                    continue
-                name = row["original_name"]
-            to_add.append((name, row["normalized_path"]))
-        if not to_add:
-            msg = f"Skipped {skipped_covered} covered, {skipped_invalid} invalid."
-            messagebox.showinfo("Nothing added", msg if (skipped_covered+skipped_invalid) else "No rows to add.")
-            return
-        success = 0
-        for name, norm_path in to_add:
-            if add_custom_game(self.config_path, name, norm_path):
-                success += 1
-        messagebox.showinfo("Done", f"Added {success} entries. Skipped: {skipped_covered} covered, {skipped_invalid} invalid.")
-        self.update_status(f"Added {success} custom entries")
-        self.load_custom_config()
-
-    def copy_suggested_checked(self):
-        indices = self.get_checked_indices()
-        if not indices:
-            messagebox.showinfo("No Selection", "No rows checked.")
-            return
-        for idx in indices:
-            row = self.scan_results[idx]
-            if row["suggested_name"]:
-                row["selected_name"] = row["suggested_name"]
-                self._update_tree_row(idx)
-        log(f"Copied suggestions to {len(indices)} checked rows")
-        self.update_status("Copied suggestions to checked rows")
-
-    # ------------------------------------------------------------------
-    # Context menu actions (on selected/highlighted rows)
+    # Unified Rescan Selected – re-evaluates both name and path
     # ------------------------------------------------------------------
     def rescan_selected(self, ids=None):
-        indices = [self.tree.index(iid) for iid in ids] if ids else []
-        if not indices:
+        if ids is None:
+            # Called from button – use checked rows
+            ids = [child for child in self.tree.get_children() if self.tree.set(child, "check") == "☑"]
+        else:
+            ids = [iid for iid in ids]  # already list of iids
+        if not ids:
             messagebox.showinfo("No Selection", "No rows selected.")
             return
-        log(f"Rescanning {len(indices)} selected rows")
+        log(f"Rescanning {len(ids)} selected rows")
         def worker():
-            for idx in indices:
+            for iid in ids:
                 if self.stop_scan:
                     break
+                idx = self.tree.index(iid)
                 row = self.scan_results[idx]
                 log(f"  Rescanning {row['original_name']} (path: {row['path']})")
-                if row["selected_name"].strip():
-                    name_to_resolve = row["selected_name"].strip()
-                    official = self.resolve_edited_name(name_to_resolve)
+                # Use current name and current path
+                current_name = row["selected_name"].strip()
+                current_path = Path(row["path"])
+                # If name is edited, try to resolve it; otherwise resolve from path
+                resolved_name = None
+                match_type = None
+                if current_name:
+                    # Try to resolve the edited name
+                    official = self.resolve_edited_name(current_name)
                     if official:
                         row["selected_name"] = official
+                        resolved_name = official
                         log(f"    User name resolved to official: {official}")
                     else:
-                        log(f"    User name '{name_to_resolve}' not found in manifest, keeping as custom")
-                    sugg = self.suggest_similar_name(row["original_name"])
-                    row["suggested_name"] = sugg if sugg else ""
-                else:
-                    resolved_name, match_type, _ = self.resolve_game_name_extended(row["original_name"], Path(row["path"]))
-                    if resolved_name:
-                        if match_type in ("exact", "fuzzy", "path-ancestor", "parent-1", "parent-2", "parent-generic"):
-                            row["selected_name"] = resolved_name
-                            log(f"    Auto-resolved to: {resolved_name} (match: {match_type})")
+                        # Keep user's name, but also try path resolution
+                        log(f"    User name '{current_name}' not found in manifest, keeping as custom")
+                        resolved_name = current_name
+                # Always also check path-based resolution
+                if current_path.exists():
+                    # Update normalized path
+                    row["normalized_path"] = normalize_path(current_path)
+                    # Try extended resolution using the folder name and full path
+                    folder_name = current_path.name
+                    path_resolved, path_match_type, _ = self.resolve_game_name_extended(folder_name, current_path)
+                    if path_resolved:
+                        # If we didn't have a resolved name yet, or path match is better (exact/fuzzy/path-ancestor)
+                        if not resolved_name or path_match_type in ("exact", "fuzzy", "path-ancestor"):
+                            row["selected_name"] = path_resolved
+                            resolved_name = path_resolved
+                            match_type = path_match_type
+                            log(f"    Path-resolved to: {path_resolved} (match: {path_match_type})")
                         else:
-                            row["suggested_name"] = resolved_name
-                            log(f"    Auto-suggested: {resolved_name}")
+                            # Keep existing resolved name, but store suggestion
+                            row["suggested_name"] = path_resolved
+                            log(f"    Path-suggested: {path_resolved} (but keeping user name)")
                     else:
-                        sugg = self.suggest_similar_name(row["original_name"])
-                        row["suggested_name"] = sugg if sugg else ""
-                        log(f"    No auto-resolution, suggested: {row['suggested_name']}")
+                        # If path didn't resolve, suggest from folder name
+                        sugg = self.suggest_similar_name(folder_name)
+                        if sugg:
+                            row["suggested_name"] = sugg
+                            log(f"    Suggested: {sugg}")
+                        else:
+                            row["suggested_name"] = ""
+                # Update coverage based on resolved name and normalized path
                 game_for_coverage = row["selected_name"] if row["selected_name"] else (row["suggested_name"] if row["suggested_name"] else row["original_name"])
-                cov_icon, _ = self.get_coverage_status(game_for_coverage, row["normalized_path"], match_type if 'match_type' in locals() else None)
+                cov_icon, _ = self.get_coverage_status(game_for_coverage, row["normalized_path"], match_type)
                 row["coverage_icon"] = cov_icon
                 row["game_name_for_coverage"] = game_for_coverage
-                preview, valid_count = get_files_preview_and_valid(Path(row["path"]), self.exclude_patterns, max_count=3, max_depth=2)
+                # Refresh file preview with current sample count and exclusion settings
+                preview, valid_count = get_files_preview_and_valid(Path(row["path"]), self.exclude_patterns,
+                                                                   max_count=self.sample_count.get(),
+                                                                   max_depth=2,
+                                                                   exclude_enabled=self.exclude_patterns_enabled.get())
                 row["valid_icon"] = "✔️" if valid_count > 0 else "❌"
                 row["valid_count"] = valid_count
                 row["files_preview"] = ", ".join(preview) if preview else "(no files)"
@@ -1417,65 +1359,15 @@ class LudusaviGUI:
         self.update_status("Rescanning selected rows...")
         threading.Thread(target=worker).start()
 
-    def rescan_path(self, ids=None):
-        """
-        Resolve game name based on the edited path (not folder name).
-        Useful when the user manually changed the path.
-        """
-        indices = [self.tree.index(iid) for iid in ids] if ids else []
-        if not indices:
-            messagebox.showinfo("No Selection", "No rows selected.")
-            return
-        log(f"Rescanning path(s) for {len(indices)} selected rows")
-        def worker():
-            for idx in indices:
-                if self.stop_scan:
-                    break
-                row = self.scan_results[idx]
-                # Use the current path (may have been edited)
-                path_str = row["path"]
-                path_obj = Path(path_str)
-                log(f"  Rescanning path: {path_str}")
-                # Update normalized path
-                if path_obj.exists():
-                    row["normalized_path"] = normalize_path(path_obj)
-                # Resolve game name from the full path (not just folder name)
-                # Use the original folder name (last part) but also check the path itself
-                folder_name = path_obj.name
-                # Try extended resolution on the full path
-                resolved_name, match_type, _ = self.resolve_game_name_extended(folder_name, path_obj)
-                if resolved_name:
-                    if match_type in ("exact", "fuzzy", "path-ancestor", "parent-1", "parent-2", "parent-generic"):
-                        row["selected_name"] = resolved_name
-                        log(f"    Resolved to: {resolved_name} (match: {match_type})")
-                    else:
-                        row["suggested_name"] = resolved_name
-                        log(f"    Suggested: {resolved_name}")
-                else:
-                    # Try fuzzy on folder name
-                    sugg = self.suggest_similar_name(folder_name)
-                    if sugg:
-                        row["suggested_name"] = sugg
-                    else:
-                        row["suggested_name"] = ""
-                    log(f"    No resolution, suggested: {row['suggested_name']}")
-                # Update coverage
-                game_for_coverage = row["selected_name"] if row["selected_name"] else (row["suggested_name"] if row["suggested_name"] else row["original_name"])
-                cov_icon, _ = self.get_coverage_status(game_for_coverage, row["normalized_path"], match_type if 'match_type' in locals() else None)
-                row["coverage_icon"] = cov_icon
-                row["game_name_for_coverage"] = game_for_coverage
-                # File preview
-                preview, valid_count = get_files_preview_and_valid(Path(path_str), self.exclude_patterns, max_count=3, max_depth=2)
-                row["valid_icon"] = "✔️" if valid_count > 0 else "❌"
-                row["valid_count"] = valid_count
-                row["files_preview"] = ", ".join(preview) if preview else "(no files)"
-                self.root.after(0, lambda i=idx: self._update_tree_row(i))
-                self.update_status(f"Path resolved: {path_str} -> {row['selected_name'] or row['suggested_name'] or '?'} {cov_icon} {row['valid_icon']}")
-        self.update_status("Rescanning paths...")
-        threading.Thread(target=worker).start()
-
+    # ------------------------------------------------------------------
+    # Add selected rows to Ludusavi
+    # ------------------------------------------------------------------
     def add_selected(self, ids=None):
-        indices = [self.tree.index(iid) for iid in ids] if ids else []
+        if ids is None:
+            ids = [child for child in self.tree.get_children() if self.tree.set(child, "check") == "☑"]
+        else:
+            ids = [iid for iid in ids]
+        indices = [self.tree.index(iid) for iid in ids]
         if not indices:
             messagebox.showinfo("No Selection", "No rows selected.")
             return
@@ -1510,8 +1402,15 @@ class LudusaviGUI:
         self.update_status(f"Added {success} custom entries")
         self.load_custom_config()
 
+    # ------------------------------------------------------------------
+    # Copy suggested name to selected name
+    # ------------------------------------------------------------------
     def copy_suggested_to_selected(self, ids=None):
-        indices = [self.tree.index(iid) for iid in ids] if ids else []
+        if ids is None:
+            ids = [child for child in self.tree.get_children() if self.tree.set(child, "check") == "☑"]
+        else:
+            ids = [iid for iid in ids]
+        indices = [self.tree.index(iid) for iid in ids]
         if not indices:
             messagebox.showinfo("No Selection", "No rows selected.")
             return
@@ -1520,7 +1419,7 @@ class LudusaviGUI:
             if row["suggested_name"]:
                 row["selected_name"] = row["suggested_name"]
                 self._update_tree_row(idx)
-        log(f"Copied suggestions to {len(indices)} selected rows")
+        log(f"Copied suggestions to {len(indices)} rows")
         self.update_status("Copied suggestions to selected rows")
 
     def _update_tree_row(self, idx):
@@ -1547,13 +1446,16 @@ class LudusaviGUI:
             self.predefined_locations = data.get("predefined_locations", DEFAULT_PREDEFINED)
             self.exclude_patterns = data.get("exclude_patterns", DEFAULT_EXCLUDE)
             self.excluded_folder_names = data.get("excluded_folder_names", DEFAULT_EXCLUDED_FOLDERS)
-            self.exclude_folders_enabled = data.get("exclude_folders_enabled", True)
-            self.scan_depth = data.get("scan_depth", 1)
-            self.deep_scan_enabled = data.get("deep_scan_enabled", True)
-            self.game_folder_depth = data.get("game_folder_depth", 3)
-            self.save_folder_depth = data.get("save_folder_depth", 5)
-            self.skip_system_folders = data.get("skip_system_folders", True)
-            self.stop_at_game_folder = data.get("stop_at_game_folder", True)
+            # Tkinter variables
+            self.exclude_folders_enabled = tk.BooleanVar(value=data.get("exclude_folders_enabled", True))
+            self.exclude_patterns_enabled = tk.BooleanVar(value=data.get("exclude_patterns_enabled", True))
+            self.scan_depth = tk.IntVar(value=data.get("scan_depth", 1))
+            self.deep_scan_enabled = tk.BooleanVar(value=data.get("deep_scan_enabled", True))
+            self.game_folder_depth = tk.IntVar(value=data.get("game_folder_depth", 3))
+            self.save_folder_depth = tk.IntVar(value=data.get("save_folder_depth", 5))
+            self.sample_count = tk.IntVar(value=data.get("sample_count", 3))
+            self.skip_system_folders = tk.BooleanVar(value=data.get("skip_system_folders", True))
+            self.stop_at_game_folder = tk.BooleanVar(value=data.get("stop_at_game_folder", True))
             log(f"Loaded settings from {SETTINGS_FILE}")
         else:
             self.ludusavi_path = DEFAULT_LUDUSAVI
@@ -1562,13 +1464,15 @@ class LudusaviGUI:
             self.predefined_locations = DEFAULT_PREDEFINED.copy()
             self.exclude_patterns = DEFAULT_EXCLUDE.copy()
             self.excluded_folder_names = DEFAULT_EXCLUDED_FOLDERS.copy()
-            self.exclude_folders_enabled = True
-            self.scan_depth = 1
-            self.deep_scan_enabled = True
-            self.game_folder_depth = 3
-            self.save_folder_depth = 5
-            self.skip_system_folders = True
-            self.stop_at_game_folder = True
+            self.exclude_folders_enabled = tk.BooleanVar(value=True)
+            self.exclude_patterns_enabled = tk.BooleanVar(value=True)
+            self.scan_depth = tk.IntVar(value=1)
+            self.deep_scan_enabled = tk.BooleanVar(value=True)
+            self.game_folder_depth = tk.IntVar(value=3)
+            self.save_folder_depth = tk.IntVar(value=5)
+            self.sample_count = tk.IntVar(value=3)
+            self.skip_system_folders = tk.BooleanVar(value=True)
+            self.stop_at_game_folder = tk.BooleanVar(value=True)
             log("No settings file, using defaults")
         if not self.ludusavi_path.exists():
             log(f"Warning: ludusavi.exe not found at {self.ludusavi_path}, using default")
