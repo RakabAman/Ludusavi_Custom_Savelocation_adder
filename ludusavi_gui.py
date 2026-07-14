@@ -5,6 +5,13 @@ Ludusavi Custom Save Adder - GUI (Live Settings, Unified Rescan, Sample Count)
 - Rescan Selected re-evaluates both name and path.
 - Sample Files count adjustable.
 - Toggle file exclusions on/off inside their respective frames.
+- Match types (exact/parent/child) are configurable.
+- Matched path is shown in a separate column.
+- Custom config is included in name resolution and coverage.
+- Horizontal scrollbar for the results tree.
+- Startup warnings for missing ludusavi.exe / manifest.yaml.
+- Popup autocomplete dialog for editing game names.
+- Descriptive labels for match types.
 """
 
 import os
@@ -223,10 +230,30 @@ class LudusaviGUI:
 
         self.start_background_manifest_load()
 
+        # Check essential files after UI is fully loaded
+        self.root.after(500, self.check_essential_files)
+
         if len(sys.argv) > 1:
             folder = sys.argv[1]
             log(f"Command-line auto-scan: {folder}")
-            self.root.after(500, lambda: self.scan_custom_folder(folder))
+            self.root.after(1000, lambda: self.scan_custom_folder(folder))
+
+    # ------------------------------------------------------------------
+    # Essential files check
+    # ------------------------------------------------------------------
+    def check_essential_files(self):
+        """Warn the user if ludusavi.exe or manifest.yaml are missing."""
+        missing = []
+        if not self.ludusavi_path.exists():
+            missing.append("ludusavi.exe")
+        if not self.manifest_path.exists():
+            missing.append("manifest.yaml")
+        if missing:
+            msg = (f"The following essential file(s) were not found:\n\n"
+                   f"{', '.join(missing)}\n\n"
+                   f"Please set the correct paths in the Settings tab and click 'Reload Manifest'.\n"
+                   f"The program will still work, but some features may be limited.")
+            messagebox.showwarning("Missing Files", msg)
 
     # ------------------------------------------------------------------
     # Status bar
@@ -245,6 +272,11 @@ class LudusaviGUI:
         if self.config_path.exists():
             with open(self.config_path, "r", encoding="utf-8") as f:
                 self.custom_config = yaml.safe_load(f) or {}
+            # Normalize paths in custom config
+            if "customGames" in self.custom_config:
+                for entry in self.custom_config["customGames"]:
+                    if "files" in entry:
+                        entry["files"] = [normalize_path(Path(p)) for p in entry["files"]]
             log(f"  Loaded {len(self.custom_config.get('customGames', []))} custom entries")
         else:
             self.custom_config = {"customGames": []}
@@ -263,15 +295,15 @@ class LudusaviGUI:
         words = [w for w in words if w not in stopwords]
         return ' '.join(words)
 
-    def _find_best_fuzzy_match(self, candidate: str, manifest_keys: list, cutoff=0.65) -> str:
-        if not candidate or not manifest_keys:
+    def _find_best_fuzzy_match(self, candidate: str, keys: list, cutoff=0.65) -> str:
+        if not candidate or not keys:
             return None
         normalized_candidate = self._normalize_for_fuzzy(candidate)
         if not normalized_candidate:
             return None
         best_match = None
         best_score = 0.0
-        for key in manifest_keys:
+        for key in keys:
             norm_key = self._normalize_for_fuzzy(key)
             if not norm_key:
                 continue
@@ -474,12 +506,10 @@ class LudusaviGUI:
                 try:
                     with open(MANIFEST_CACHE, "rb") as f:
                         self.manifest_data = pickle.load(f)
+                    # Normalize paths in cached manifest
+                    self._normalize_manifest_paths()
                     elapsed = (time.perf_counter() - start) * 1000
                     log(f"Loaded cached manifest: {len(self.manifest_data)} games in {elapsed:.0f} ms")
-                    if "Stardew Valley" in self.manifest_data:
-                        log("  Stardew Valley found in cache")
-                    else:
-                        log("  Stardew Valley NOT in cache")
                     self.update_status(f"Loaded cached manifest ({len(self.manifest_data)} games)")
                     self.manifest_loaded = True
                     return
@@ -504,14 +534,12 @@ class LudusaviGUI:
                     log("Using SafeLoader (slower), install libyaml for faster parsing")
                 with open(self.manifest_path, "r", encoding="utf-8") as f:
                     self.manifest_data = yaml.load(f, Loader=Loader)
+                # Normalize paths
+                self._normalize_manifest_paths()
                 with open(MANIFEST_CACHE, "wb") as f:
                     pickle.dump(self.manifest_data, f)
                 elapsed = (time.perf_counter() - start) * 1000
                 log(f"Parsed YAML: {len(self.manifest_data)} games in {elapsed:.0f} ms. Cached to {MANIFEST_CACHE}")
-                if "Stardew Valley" in self.manifest_data:
-                    log("  Stardew Valley found in parsed manifest")
-                else:
-                    log("  Stardew Valley NOT in parsed manifest")
                 self.update_status(f"Loaded manifest ({len(self.manifest_data)} games)")
             except Exception as e:
                 log(f"YAML load error: {e}")
@@ -522,6 +550,19 @@ class LudusaviGUI:
 
         self.manifest_loading_thread = threading.Thread(target=load_worker, daemon=True)
         self.manifest_loading_thread.start()
+
+    def _normalize_manifest_paths(self):
+        """Normalize all file paths in the manifest to use placeholders."""
+        if not self.manifest_data:
+            return
+        for game_name, game_data in self.manifest_data.items():
+            if "files" in game_data:
+                # files is a dict: key = path, value = pattern
+                new_files = {}
+                for path, pattern in game_data["files"].items():
+                    norm_path = normalize_path(Path(path))
+                    new_files[norm_path] = pattern
+                game_data["files"] = new_files
 
     def ensure_manifest_ready(self):
         if self.manifest_loaded:
@@ -535,24 +576,37 @@ class LudusaviGUI:
         self.update_status("Manifest ready")
 
     def resolve_game_name(self, candidate):
+        """Resolve name from manifest first, then custom config."""
         if not self.manifest_loaded:
             self.ensure_manifest_ready()
-        if not self.manifest_data:
-            return None
-        if candidate in self.manifest_data:
-            log(f"  Exact match: {candidate}")
-            return candidate
-        lower_candidate = candidate.lower()
-        for name in self.manifest_data:
-            if name.lower() == lower_candidate:
-                log(f"  Case-insensitive match: {name}")
-                return name
-        if candidate.isdigit():
-            sid = int(candidate)
-            for name, data in self.manifest_data.items():
-                if data.get("steam", {}).get("id") == sid:
-                    log(f"  Steam ID match: {name}")
+        # 1. Check manifest
+        if self.manifest_data:
+            if candidate in self.manifest_data:
+                log(f"  Exact match in manifest: {candidate}")
+                return candidate
+            lower_candidate = candidate.lower()
+            for name in self.manifest_data:
+                if name.lower() == lower_candidate:
+                    log(f"  Case-insensitive match in manifest: {name}")
                     return name
+            if candidate.isdigit():
+                sid = int(candidate)
+                for name, data in self.manifest_data.items():
+                    if data.get("steam", {}).get("id") == sid:
+                        log(f"  Steam ID match in manifest: {name}")
+                        return name
+        # 2. Check custom config
+        if self.custom_config:
+            for entry in self.custom_config.get("customGames", []):
+                entry_name = entry.get("name")
+                if not entry_name:
+                    continue
+                if entry_name == candidate:
+                    log(f"  Exact match in custom config: {entry_name}")
+                    return entry_name
+                if entry_name.lower() == lower_candidate:
+                    log(f"  Case-insensitive match in custom config: {entry_name}")
+                    return entry_name
         return None
 
     def suggest_similar_name(self, candidate):
@@ -565,36 +619,91 @@ class LudusaviGUI:
         match = self._find_best_fuzzy_match(candidate, list(self.manifest_data.keys()))
         return match
 
+    # New helper to find all matches for a path against a list of known paths
+    def _find_matches_for_path(self, normalized_path: str, known_paths: list):
+        """Return list of (matched_path, match_type) for exact/parent/child matches."""
+        if not known_paths:
+            return []
+        # Normalize separators for comparison
+        norm_path = normalized_path.replace("\\", "/").rstrip("/") + "/"
+        matches = []
+        for known in known_paths:
+            known_norm = known.replace("\\", "/").rstrip("/") + "/"
+            if norm_path == known_norm:
+                matches.append((known, "exact"))
+            elif norm_path.startswith(known_norm):
+                matches.append((known, "parent"))
+            elif known_norm.startswith(norm_path):
+                matches.append((known, "child"))
+        return matches
+
     def is_path_covered_by_manifest(self, game_name, normalized_path):
+        """Return list of (matched_path, match_type) from manifest."""
         if not self.manifest_loaded or not self.manifest_data:
-            return False
+            return []
         game_entry = self.manifest_data.get(game_name)
         if not game_entry:
-            return False
+            return []
         files_obj = game_entry.get("files", {})
-        norm_lower = normalized_path.lower().replace("\\", "/")
-        for manifest_path in files_obj.keys():
-            if manifest_path.lower().replace("\\", "/") == norm_lower:
-                return True
-        return False
+        known_paths = list(files_obj.keys())
+        return self._find_matches_for_path(normalized_path, known_paths)
 
     def is_path_covered_by_custom(self, normalized_path):
+        """Return list of (matched_path, match_type) from custom config."""
         if not self.custom_config:
-            return False
+            return []
+        known_paths = []
         for entry in self.custom_config.get("customGames", []):
-            for path in entry.get("files", []):
-                if path == normalized_path:
-                    return True
-        return False
+            known_paths.extend(entry.get("files", []))
+        return self._find_matches_for_path(normalized_path, known_paths)
 
-    def get_coverage_status(self, game_name, normalized_path, match_type=None):
-        if match_type == "path-ancestor":
-            return "✅", "Covered by manifest (parent)"
-        if game_name and self.is_path_covered_by_manifest(game_name, normalized_path):
-            return "✅", "Covered by manifest"
-        if self.is_path_covered_by_custom(normalized_path):
-            return "✅", "Covered by custom entry"
-        return "❌", "New location"
+    def get_coverage_status(self, game_name, normalized_path):
+        """
+        Combine matches from manifest and custom, filter by enabled types,
+        pick the longest matched path, return (icon, status, matched_path).
+        """
+        all_matches = []
+        # Get manifest matches if game_name provided and exists
+        if game_name:
+            manifest_matches = self.is_path_covered_by_manifest(game_name, normalized_path)
+            all_matches.extend(manifest_matches)
+        # Get custom matches
+        custom_matches = self.is_path_covered_by_custom(normalized_path)
+        all_matches.extend(custom_matches)
+
+        if not all_matches:
+            return "❌", "New location", ""
+
+        # Filter by enabled match types
+        allowed_types = []
+        if self.match_exact_enabled.get():
+            allowed_types.append("exact")
+        if self.match_parent_enabled.get():
+            allowed_types.append("parent")
+        if self.match_child_enabled.get():
+            allowed_types.append("child")
+        filtered = [(p, t) for p, t in all_matches if t in allowed_types]
+        if not filtered:
+            return "❌", "New location (types disabled)", ""
+
+        # Priority: exact > parent > child. Within same type, pick longest path.
+        def match_priority(match_tuple):
+            path, mtype = match_tuple
+            priority = {"exact": 0, "parent": 1, "child": 2}[mtype]
+            return (priority, -len(path))  # longest path first within same priority
+
+        best = min(filtered, key=match_priority)
+        matched_path, match_type = best
+
+        # Determine icon
+        if match_type == "exact":
+            icon = "✅"
+            status = "Covered (exact match)"
+        else:  # parent or child
+            icon = "🟢"
+            status = f"Covered ({match_type} match: {matched_path})"
+
+        return icon, status, matched_path
 
     def update_status(self, msg):
         self.root.after(0, lambda: self.status_label.config(text=msg[:120]))
@@ -667,9 +776,28 @@ class LudusaviGUI:
 
         ttk.Checkbutton(check_frame, text="Stop Recursing at First Game Folder", variable=self.stop_at_game_folder).pack(side=tk.LEFT)
 
-        # Row 5: Save & Reload buttons
+        # Row 5: Match type checkboxes (in one row)
+        match_frame = ttk.Frame(paths_frame)
+        match_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Label(match_frame, text="Match types:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Checkbutton(match_frame, text="Exact", variable=self.match_exact_enabled).pack(side=tk.LEFT, padx=(0,10))
+        ttk.Checkbutton(match_frame, text="Parent", variable=self.match_parent_enabled).pack(side=tk.LEFT, padx=(0,10))
+        ttk.Checkbutton(match_frame, text="Child", variable=self.match_child_enabled).pack(side=tk.LEFT)
+
+        # Row 6: Description label (wrapped)
+        desc_frame = ttk.Frame(paths_frame)
+        desc_frame.grid(row=6, column=0, columnspan=3, sticky=tk.W, padx=5, pady=2)
+        desc_text = (
+            "Exact: path matches known save root exactly.  "
+            "Parent: scanned folder is inside a known save root.  "
+            "Child: scanned folder contains a known save root (uncommon)."
+        )
+        ttk.Label(desc_frame, text=desc_text, wraplength=700, justify=tk.LEFT).pack(anchor=tk.W)
+
+        # Row 7: Save & Reload buttons
         btn_frame = ttk.Frame(paths_frame)
-        btn_frame.grid(row=5, column=1, pady=5)
+        btn_frame.grid(row=7, column=1, pady=5)
         ttk.Button(btn_frame, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Reload Manifest", command=self.reload_manifest).pack(side=tk.LEFT, padx=2)
 
@@ -697,8 +825,6 @@ class LudusaviGUI:
         exclude_frame = ttk.LabelFrame(paned, text="Exclude Save File Patterns (wildcards)")
         paned.add(exclude_frame, weight=1)
 
-        # Enable/disable checkbox for file exclusions (inside this frame)
-        # NO REASSIGNMENT – use existing variable
         ttk.Checkbutton(exclude_frame, text="Enable file exclusions", variable=self.exclude_patterns_enabled).pack(anchor=tk.W, padx=5, pady=2)
 
         excl_list_frame = ttk.Frame(exclude_frame)
@@ -719,8 +845,6 @@ class LudusaviGUI:
         excl_folder_frame = ttk.LabelFrame(paned, text="Exclude Folder Names (Skip detection, scan recursively)")
         paned.add(excl_folder_frame, weight=1)
 
-        # Enable/disable checkbox for folder exclusions (inside this frame)
-        # NO REASSIGNMENT – use existing variable
         ttk.Checkbutton(excl_folder_frame, text="Enable folder exclusions", variable=self.exclude_folders_enabled).pack(anchor=tk.W, padx=5, pady=2)
 
         excl_folder_list_frame = ttk.Frame(excl_folder_frame)
@@ -778,7 +902,11 @@ class LudusaviGUI:
             "save_folder_depth": self.save_folder_depth.get(),
             "sample_count": self.sample_count.get(),
             "skip_system_folders": self.skip_system_folders.get(),
-            "stop_at_game_folder": self.stop_at_game_folder.get()
+            "stop_at_game_folder": self.stop_at_game_folder.get(),
+            # New match type settings
+            "match_exact_enabled": self.match_exact_enabled.get(),
+            "match_parent_enabled": self.match_parent_enabled.get(),
+            "match_child_enabled": self.match_child_enabled.get()
         }
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
@@ -820,8 +948,10 @@ class LudusaviGUI:
     # Scan tab
     # ------------------------------------------------------------------
     def build_scan_tab(self):
+        # ----- Toolbar (packed at top) -----
         toolbar = ttk.Frame(self.scan_frame)
-        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        toolbar.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
         ttk.Button(toolbar, text="Scan Predefined", command=self.scan_predefined).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Browse & Scan", command=self.scan_custom_folder_dialog).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Stop", command=self.stop_scanning).pack(side=tk.LEFT, padx=2)
@@ -831,8 +961,13 @@ class LudusaviGUI:
         ttk.Button(toolbar, text="Rescan Selected", command=self.rescan_selected).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Add Selected to Ludusavi", command=self.add_selected).pack(side=tk.LEFT, padx=2)
 
-        columns = ("check", "cov", "valid", "path", "name", "suggest", "files")
-        self.tree = ttk.Treeview(self.scan_frame, columns=columns, show="headings", height=12)
+        # ----- Container for tree + scrollbars (packed below toolbar) -----
+        tree_container = ttk.Frame(self.scan_frame)
+        tree_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # ----- Treeview (parent = tree_container) -----
+        columns = ("check", "cov", "valid", "path", "name", "suggest", "files", "matched")
+        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=12)
         self.tree.heading("check", text="✓")
         self.tree.heading("cov", text="Covered")
         self.tree.heading("valid", text="Valid")
@@ -840,26 +975,41 @@ class LudusaviGUI:
         self.tree.heading("name", text="Game Name (editable)")
         self.tree.heading("suggest", text="Suggested")
         self.tree.heading("files", text="Sample Files")
-        
+        self.tree.heading("matched", text="Matched Path")
+
+        # All columns stretch=False so resizing one doesn't squeeze others,
+        # and horizontal scrollbar appears when total width exceeds visible area.
         self.tree.column("check", width=40, anchor=tk.CENTER, minwidth=30, stretch=False)
-        self.tree.column("cov", width=48, anchor=tk.CENTER, minwidth=35, stretch=False)
+        self.tree.column("cov", width=60, anchor=tk.CENTER, minwidth=35, stretch=False)
         self.tree.column("valid", width=45, anchor=tk.CENTER, minwidth=35, stretch=False)
-        self.tree.column("path", width=350, minwidth=200, stretch=True)
+        self.tree.column("path", width=400, minwidth=200, stretch=False)
         self.tree.column("name", width=130, minwidth=120, stretch=False)
         self.tree.column("suggest", width=130, minwidth=120, stretch=False)
-        self.tree.column("files", width=350, minwidth=150, stretch=True)
+        self.tree.column("files", width=350, minwidth=150, stretch=False)
+        self.tree.column("matched", width=250, minwidth=100, stretch=False)
 
-        tree_scroll = ttk.Scrollbar(self.scan_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=tree_scroll.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # ----- Scrollbars -----
+        vsb = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=self.tree.xview)
 
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        # Grid layout inside tree_container
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
+
+        # Drag‑and‑drop on scan_frame
         self.scan_frame.drop_target_register(DND_FILES)
         self.scan_frame.dnd_bind('<<Drop>>', self.on_drop)
 
         self.tree.bind("<Double-1>", self.on_double_click)
-        self.tree.bind("<Button-3>", self.show_context_menu)
-
+        self.tree.bind("<Button-3>", self.show_context_menu)      
+        
+    
     # ------------------------------------------------------------------
     # Treeview interactions
     # ------------------------------------------------------------------
@@ -882,7 +1032,7 @@ class LudusaviGUI:
                 row["selected_name"] = sugg
                 log(f"Copied suggestion '{sugg}' to Name")
         elif column == "#5":   # Name column (editable)
-            self.edit_name_cell(item, idx)
+            self.edit_name_with_popup(item, idx)
 
     def edit_path_cell(self, item, idx):
         col = "#4"
@@ -904,7 +1054,116 @@ class LudusaviGUI:
         entry.bind("<Return>", save_edit)
         entry.bind("<FocusOut>", save_edit)
 
+    def edit_name_with_popup(self, item, idx):
+        """Open a popup dialog with searchable list of known game names."""
+        # Collect all known names from manifest and custom config
+        known_names = set()
+        if self.manifest_data:
+            known_names.update(self.manifest_data.keys())
+        if self.custom_config:
+            for entry in self.custom_config.get("customGames", []):
+                name = entry.get("name")
+                if name:
+                    known_names.add(name)
+        known_names = sorted(known_names)  # sort alphabetically
+
+        if not known_names:
+            # Fallback to simple edit if no names available
+            self.edit_name_cell(item, idx)
+            return
+
+        current_name = self.tree.set(item, "#5")
+        row = self.scan_results[idx]
+
+        # Create popup
+        popup = tk.Toplevel(self.root)
+        popup.title("Select or Enter Game Name")
+        popup.geometry("400x350")
+        popup.transient(self.root)
+        popup.grab_set()
+
+        # Search entry
+        ttk.Label(popup, text="Type to filter:").pack(padx=5, pady=(5,0), anchor=tk.W)
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(popup, textvariable=search_var)
+        search_entry.pack(fill=tk.X, padx=5, pady=5)
+        search_entry.focus_set()
+
+        # Listbox with scrollbar
+        list_frame = ttk.Frame(popup)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        listbox = tk.Listbox(list_frame, selectmode=tk.SINGLE)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Populate initial list
+        def update_list(filter_text=""):
+            listbox.delete(0, tk.END)
+            filter_lower = filter_text.lower()
+            for name in known_names:
+                if filter_text == "" or filter_lower in name.lower():
+                    listbox.insert(tk.END, name)
+            if listbox.size() > 0:
+                listbox.selection_set(0)
+
+        update_list()
+
+        # Bind search
+        def on_search_change(*args):
+            update_list(search_var.get())
+        search_var.trace('w', on_search_change)
+
+        # Buttons
+        btn_frame = ttk.Frame(popup)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        def on_select():
+            selection = listbox.curselection()
+            if selection:
+                chosen = listbox.get(selection[0])
+                self.tree.set(item, "#5", chosen)
+                row["selected_name"] = chosen
+                log(f"Selected name from popup: {chosen}")
+                popup.destroy()
+            else:
+                # If nothing selected, use what's in the search entry
+                typed = search_var.get().strip()
+                if typed:
+                    self.tree.set(item, "#5", typed)
+                    row["selected_name"] = typed
+                    log(f"Entered custom name: {typed}")
+                popup.destroy()
+
+        def on_cancel():
+            popup.destroy()
+
+        ttk.Button(btn_frame, text="OK", command=on_select).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=2)
+        # Double-click to select
+        listbox.bind("<Double-1>", lambda e: on_select())
+        # Enter key on search also selects
+        search_entry.bind("<Return>", lambda e: on_select())
+
+        # Pre‑populate search with current name (if any) to filter
+        if current_name:
+            search_var.set(current_name)
+            # Also put it in the listbox selection if it matches exactly
+            update_list(current_name)
+            # Try to select the exact match
+            for i, name in enumerate(known_names):
+                if name == current_name:
+                    listbox.selection_clear(0, tk.END)
+                    listbox.selection_set(i)
+                    listbox.see(i)
+                    break
+
+        # Wait for popup to close
+        popup.wait_window()
+
     def edit_name_cell(self, item, idx):
+        """Fallback plain entry edit (when no names available)."""
         col = "#5"
         x, y, width, height = self.tree.bbox(item, column=col)
         entry = ttk.Entry(self.tree)
@@ -967,7 +1226,7 @@ class LudusaviGUI:
     def _collect_game_folders(self, root_path: Path, max_depth: int, current_depth: int, skip_system: bool):
         if current_depth > max_depth:
             return []
-        if self.stop_scan:   # <-- new check
+        if self.stop_scan:
             return []
         results = []
         try:
@@ -1003,7 +1262,7 @@ class LudusaviGUI:
     def _collect_save_folders(self, game_folder: Path, max_depth: int, current_depth: int, exclude_patterns, exclude_enabled):
         if current_depth > max_depth:
             return []
-        if self.stop_scan:   # <-- new check
+        if self.stop_scan:
             return []
         results = []
         try:
@@ -1083,7 +1342,6 @@ class LudusaviGUI:
         total_roots = len(root_folders)
         log(f"Scan worker started, {total_roots} root folders")
         for r_idx, root in enumerate(root_folders):
-            # CHECK STOP FLAG AT THE START OF EACH ROOT
             if self.stop_scan:
                 log("Scan stopped by user")
                 break
@@ -1123,7 +1381,8 @@ class LudusaviGUI:
                             log("Scan stopped by user")
                             break
                         norm_path = normalize_path(save_folder)
-                        cov_icon, _ = self.get_coverage_status(game_name, norm_path, match_type)
+                        # Get coverage status using new method
+                        cov_icon, cov_status, matched_path = self.get_coverage_status(game_name, norm_path)
                         preview_str = ", ".join(preview) if preview else "(no files)"
                         valid_icon = "✔️" if valid_count > 0 else "❌"
                         self.scan_results.append({
@@ -1138,7 +1397,8 @@ class LudusaviGUI:
                             "valid_icon": valid_icon,
                             "valid_count": valid_count,
                             "game_name_for_coverage": game_name,
-                            "match_type": match_type
+                            "match_type": match_type,
+                            "matched_path": matched_path
                         })
                         status_msg = f"  Found save: {save_folder} -> {game_name} {cov_icon} {valid_icon}"
                         log(f"    {status_msg}")
@@ -1150,7 +1410,6 @@ class LudusaviGUI:
                 candidates = self._collect_dirs_at_depth(root_path, self.scan_depth.get())
                 log(f"  Found {len(candidates)} directories at depth {self.scan_depth.get()}")
                 for sub in candidates:
-                    # CHECK STOP FLAG BEFORE PROCESSING EACH SUBFOLDER
                     if self.stop_scan:
                         log("Scan stopped by user")
                         break
@@ -1168,7 +1427,8 @@ class LudusaviGUI:
                         sugg = self.suggest_similar_name(orig)
                     norm_path = normalize_path(sub)
                     game_for_coverage = exact if exact else (sugg if sugg else orig)
-                    cov_icon, _ = self.get_coverage_status(game_for_coverage, norm_path, match_type)
+                    # Get coverage using new method
+                    cov_icon, cov_status, matched_path = self.get_coverage_status(game_for_coverage, norm_path)
                     preview, valid_count = get_files_preview_and_valid(sub, self.exclude_patterns,
                                                                        max_count=self.sample_count.get(),
                                                                        max_depth=2,
@@ -1187,7 +1447,8 @@ class LudusaviGUI:
                         "valid_icon": valid_icon,
                         "valid_count": valid_count,
                         "game_name_for_coverage": game_for_coverage,
-                        "match_type": match_type
+                        "match_type": match_type,
+                        "matched_path": matched_path
                     })
                     status_msg = f"Found: {orig} -> {exact or sugg or '?'} {cov_icon} {valid_icon} (match: {match_type or 'none'})"
                     log(f"    {status_msg}")
@@ -1250,7 +1511,8 @@ class LudusaviGUI:
                 item["path"],
                 item["selected_name"],
                 item["suggested_name"],
-                item["files_preview"]
+                item["files_preview"],
+                item.get("matched_path", "")
             ), tags=(item["path"],))
         self.tree.bind("<ButtonRelease-1>", self.on_tree_click)
 
@@ -1283,10 +1545,9 @@ class LudusaviGUI:
     # ------------------------------------------------------------------
     def rescan_selected(self, ids=None):
         if ids is None:
-            # Called from button – use checked rows
             ids = [child for child in self.tree.get_children() if self.tree.set(child, "check") == "☑"]
         else:
-            ids = [iid for iid in ids]  # already list of iids
+            ids = [iid for iid in ids]
         if not ids:
             messagebox.showinfo("No Selection", "No rows selected.")
             return
@@ -1298,55 +1559,45 @@ class LudusaviGUI:
                 idx = self.tree.index(iid)
                 row = self.scan_results[idx]
                 log(f"  Rescanning {row['original_name']} (path: {row['path']})")
-                # Use current name and current path
                 current_name = row["selected_name"].strip()
                 current_path = Path(row["path"])
-                # If name is edited, try to resolve it; otherwise resolve from path
                 resolved_name = None
                 match_type = None
                 if current_name:
-                    # Try to resolve the edited name
                     official = self.resolve_edited_name(current_name)
                     if official:
                         row["selected_name"] = official
                         resolved_name = official
                         log(f"    User name resolved to official: {official}")
                     else:
-                        # Keep user's name, but also try path resolution
                         log(f"    User name '{current_name}' not found in manifest, keeping as custom")
                         resolved_name = current_name
-                # Always also check path-based resolution
                 if current_path.exists():
-                    # Update normalized path
                     row["normalized_path"] = normalize_path(current_path)
-                    # Try extended resolution using the folder name and full path
                     folder_name = current_path.name
                     path_resolved, path_match_type, _ = self.resolve_game_name_extended(folder_name, current_path)
                     if path_resolved:
-                        # If we didn't have a resolved name yet, or path match is better (exact/fuzzy/path-ancestor)
                         if not resolved_name or path_match_type in ("exact", "fuzzy", "path-ancestor"):
                             row["selected_name"] = path_resolved
                             resolved_name = path_resolved
                             match_type = path_match_type
                             log(f"    Path-resolved to: {path_resolved} (match: {path_match_type})")
                         else:
-                            # Keep existing resolved name, but store suggestion
                             row["suggested_name"] = path_resolved
                             log(f"    Path-suggested: {path_resolved} (but keeping user name)")
                     else:
-                        # If path didn't resolve, suggest from folder name
                         sugg = self.suggest_similar_name(folder_name)
                         if sugg:
                             row["suggested_name"] = sugg
                             log(f"    Suggested: {sugg}")
                         else:
                             row["suggested_name"] = ""
-                # Update coverage based on resolved name and normalized path
                 game_for_coverage = row["selected_name"] if row["selected_name"] else (row["suggested_name"] if row["suggested_name"] else row["original_name"])
-                cov_icon, _ = self.get_coverage_status(game_for_coverage, row["normalized_path"], match_type)
+                # Use new coverage
+                cov_icon, cov_status, matched_path = self.get_coverage_status(game_for_coverage, row["normalized_path"])
                 row["coverage_icon"] = cov_icon
+                row["matched_path"] = matched_path
                 row["game_name_for_coverage"] = game_for_coverage
-                # Refresh file preview with current sample count and exclusion settings
                 preview, valid_count = get_files_preview_and_valid(Path(row["path"]), self.exclude_patterns,
                                                                    max_count=self.sample_count.get(),
                                                                    max_depth=2,
@@ -1376,7 +1627,7 @@ class LudusaviGUI:
         skipped_invalid = 0
         for idx in indices:
             row = self.scan_results[idx]
-            if row["coverage_icon"] == "✅":
+            if row["coverage_icon"] == "✅" or row["coverage_icon"] == "🟢":
                 if not messagebox.askyesno("Already Covered", f"Folder '{row['original_name']}' is already covered.\nAdd anyway?"):
                     skipped_covered += 1
                     continue
@@ -1431,6 +1682,7 @@ class LudusaviGUI:
                 self.tree.set(child, "#5", row["selected_name"])
                 self.tree.set(child, "#6", row["suggested_name"])
                 self.tree.set(child, "#7", row["files_preview"])
+                self.tree.set(child, "#8", row.get("matched_path", ""))
                 break
 
     # ------------------------------------------------------------------
@@ -1456,6 +1708,10 @@ class LudusaviGUI:
             self.sample_count = tk.IntVar(value=data.get("sample_count", 3))
             self.skip_system_folders = tk.BooleanVar(value=data.get("skip_system_folders", True))
             self.stop_at_game_folder = tk.BooleanVar(value=data.get("stop_at_game_folder", True))
+            # Match type checkboxes (default: exact ON, parent ON, child OFF)
+            self.match_exact_enabled = tk.BooleanVar(value=data.get("match_exact_enabled", True))
+            self.match_parent_enabled = tk.BooleanVar(value=data.get("match_parent_enabled", True))
+            self.match_child_enabled = tk.BooleanVar(value=data.get("match_child_enabled", False))
             log(f"Loaded settings from {SETTINGS_FILE}")
         else:
             self.ludusavi_path = DEFAULT_LUDUSAVI
@@ -1473,6 +1729,9 @@ class LudusaviGUI:
             self.sample_count = tk.IntVar(value=3)
             self.skip_system_folders = tk.BooleanVar(value=True)
             self.stop_at_game_folder = tk.BooleanVar(value=True)
+            self.match_exact_enabled = tk.BooleanVar(value=True)
+            self.match_parent_enabled = tk.BooleanVar(value=True)
+            self.match_child_enabled = tk.BooleanVar(value=False)
             log("No settings file, using defaults")
         if not self.ludusavi_path.exists():
             log(f"Warning: ludusavi.exe not found at {self.ludusavi_path}, using default")
