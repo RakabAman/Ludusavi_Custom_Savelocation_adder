@@ -73,7 +73,13 @@ DEFAULT_EXCLUDE = [
     "*.jpg", "*.png", "*.bmp", "*.cfg", "*.json", "*.bak", "*.old"
 ]
 
-DEFAULT_EXCLUDED_FOLDERS = ["steam", "uplay", "epic", "origin", "gog", "socialclub", "3dmgame", "reloaded", "skidrow", "codex", "rune", "empress", "cpy", "goldberg"]
+DEFAULT_EXCLUDED_FOLDERS = [
+    "steam", "uplay", "epic", "origin", "gog", "socialclub", "3dmgame",
+    "reloaded", "skidrow", "codex", "rune", "empress", "cpy", "goldberg",
+    "KoeiTecmo", "My Games", "FLT", "GSE Saves", "Guerrilla Games",
+    "Insomniac Games", "IO Interactive", "player", "RenPy", "TangoGameworks",
+    "Respawn", "MachineGames", "profiles", "id Software", "CD Projekt Red"
+]
 
 # System folders to skip when skip_system_folders is True
 SYSTEM_FOLDERS = {
@@ -102,8 +108,7 @@ def normalize_path(path_obj: Path) -> str:
         (f"C:\\Users\\{username}\\AppData\\Roaming", "<winAppData>"),
         (f"C:\\Users\\{username}\\AppData\\Local", "<winLocalAppData>"),
         (f"C:\\Users\\{username}\\AppData\\LocalLow", "<winLocalAppDataLow>"),
-        (f"C:\\Users\\{username}\\Saved Games", "<winDocuments>\\Saved Games"),
-        (f"C:\\Users\\{username}", "<home>"),
+        (f"C:\\Users\\{username}", "<home>"),   # catches Saved Games, Desktop, etc.
         ("C:\\ProgramData", "<winProgramData>"),
         ("C:\\Users\\Public", "<winPublic>"),
     ]
@@ -624,16 +629,18 @@ class LudusaviGUI:
         """Return list of (matched_path, match_type) for exact/parent/child matches."""
         if not known_paths:
             return []
-        # Normalize separators for comparison
+        # Normalize separators and convert to lowercase for case‑insensitive matching
         norm_path = normalized_path.replace("\\", "/").rstrip("/") + "/"
+        norm_path_lower = norm_path.lower()
         matches = []
         for known in known_paths:
             known_norm = known.replace("\\", "/").rstrip("/") + "/"
-            if norm_path == known_norm:
+            known_norm_lower = known_norm.lower()
+            if norm_path_lower == known_norm_lower:
                 matches.append((known, "exact"))
-            elif norm_path.startswith(known_norm):
+            elif norm_path_lower.startswith(known_norm_lower):
                 matches.append((known, "parent"))
-            elif known_norm.startswith(norm_path):
+            elif known_norm_lower.startswith(norm_path_lower):
                 matches.append((known, "child"))
         return matches
 
@@ -1045,8 +1052,12 @@ class LudusaviGUI:
         def save_edit(event=None):
             new_val = entry.get().strip()
             if new_val:
+                # Update treeview cell
                 self.tree.set(item, col, new_val)
+                # Update the row data
                 self.scan_results[idx]["path"] = new_val
+                # **CRITICAL FIX: update the tag so _update_tree_row can find this row**
+                self.tree.item(item, tags=(new_val,))
                 if os.path.exists(new_val):
                     self.scan_results[idx]["normalized_path"] = normalize_path(Path(new_val))
                 log(f"Edited path to: {new_val}")
@@ -1113,7 +1124,7 @@ class LudusaviGUI:
         # Bind search
         def on_search_change(*args):
             update_list(search_var.get())
-        search_var.trace('w', on_search_change)
+        search_var.trace_add('write', on_search_change)
 
         # Buttons
         btn_frame = ttk.Frame(popup)
@@ -1559,57 +1570,102 @@ class LudusaviGUI:
                 idx = self.tree.index(iid)
                 row = self.scan_results[idx]
                 log(f"  Rescanning {row['original_name']} (path: {row['path']})")
+
+                # 1. Current live values
                 current_name = row["selected_name"].strip()
                 current_path = Path(row["path"])
-                resolved_name = None
-                match_type = None
-                if current_name:
-                    official = self.resolve_edited_name(current_name)
-                    if official:
-                        row["selected_name"] = official
-                        resolved_name = official
-                        log(f"    User name resolved to official: {official}")
+                folder_name = row["original_name"]
+
+                # 2. Normalise path (in case user edited it)
+                row["normalized_path"] = normalize_path(current_path)
+
+                # 3. Determine if the folder name is excluded
+                excluded = (self.exclude_folders_enabled.get() and
+                            any(folder_name.lower() == x.lower() for x in self.excluded_folder_names))
+
+                # 4. Find a suggested name – never modifies selected_name
+                suggested = None
+
+                if excluded:
+                    log(f"    Folder '{folder_name}' is excluded – trying parent folders for suggestion")
+                    parent = current_path.parent
+                    levels_up = 0
+                    while parent != parent.parent and levels_up < 5:
+                        parent_name = parent.name
+                        if not parent_name:
+                            break
+                        parent_excluded = (self.exclude_folders_enabled.get() and
+                                           any(parent_name.lower() == x.lower() for x in self.excluded_folder_names))
+                        if not parent_excluded:
+                            resolved = self.resolve_game_name(parent_name)
+                            if resolved:
+                                suggested = resolved
+                                log(f"    Resolved parent '{parent_name}' to '{resolved}'")
+                                break
+                            else:
+                                fuzzy = self.suggest_similar_name(parent_name)
+                                if fuzzy:
+                                    suggested = fuzzy
+                                    log(f"    Fuzzy matched parent '{parent_name}' to '{fuzzy}'")
+                                    break
+                        parent = parent.parent
+                        levels_up += 1
+
+                    if not suggested:
+                        # Fallback to path‑ancestor
+                        game, matched = self.find_game_by_path_ancestor(row["normalized_path"])
+                        if game:
+                            suggested = game
+                            log(f"    Path‑ancestor suggested: {game}")
+
+                else:
+                    # Not excluded – normal resolution
+                    # 1) exact/case‑insens/Steam ID on folder_name
+                    resolved = self.resolve_game_name(folder_name)
+                    if resolved:
+                        suggested = resolved
+                        log(f"    Exact/case‑insens match: {resolved}")
                     else:
-                        log(f"    User name '{current_name}' not found in manifest, keeping as custom")
-                        resolved_name = current_name
-                if current_path.exists():
-                    row["normalized_path"] = normalize_path(current_path)
-                    folder_name = current_path.name
-                    path_resolved, path_match_type, _ = self.resolve_game_name_extended(folder_name, current_path)
-                    if path_resolved:
-                        if not resolved_name or path_match_type in ("exact", "fuzzy", "path-ancestor"):
-                            row["selected_name"] = path_resolved
-                            resolved_name = path_resolved
-                            match_type = path_match_type
-                            log(f"    Path-resolved to: {path_resolved} (match: {path_match_type})")
+                        # 2) fuzzy
+                        fuzzy = self.suggest_similar_name(folder_name)
+                        if fuzzy:
+                            suggested = fuzzy
+                            log(f"    Fuzzy match: {fuzzy}")
                         else:
-                            row["suggested_name"] = path_resolved
-                            log(f"    Path-suggested: {path_resolved} (but keeping user name)")
-                    else:
-                        sugg = self.suggest_similar_name(folder_name)
-                        if sugg:
-                            row["suggested_name"] = sugg
-                            log(f"    Suggested: {sugg}")
-                        else:
-                            row["suggested_name"] = ""
-                game_for_coverage = row["selected_name"] if row["selected_name"] else (row["suggested_name"] if row["suggested_name"] else row["original_name"])
-                # Use new coverage
+                            # 3) path‑ancestor
+                            game, matched = self.find_game_by_path_ancestor(row["normalized_path"])
+                            if game:
+                                suggested = game
+                                log(f"    Path‑ancestor match: {game}")
+
+                # Only set suggested if it's different from current_name
+                if suggested and suggested != current_name:
+                    row["suggested_name"] = suggested
+                else:
+                    row["suggested_name"] = ""
+
+                # 5. Update coverage using current selected_name and normalised path
+                game_for_coverage = current_name if current_name else (suggested if suggested else folder_name)
                 cov_icon, cov_status, matched_path = self.get_coverage_status(game_for_coverage, row["normalized_path"])
                 row["coverage_icon"] = cov_icon
                 row["matched_path"] = matched_path
                 row["game_name_for_coverage"] = game_for_coverage
-                preview, valid_count = get_files_preview_and_valid(Path(row["path"]), self.exclude_patterns,
+
+                # 6. Refresh file preview with current exclusion settings
+                preview, valid_count = get_files_preview_and_valid(current_path, self.exclude_patterns,
                                                                    max_count=self.sample_count.get(),
                                                                    max_depth=2,
                                                                    exclude_enabled=self.exclude_patterns_enabled.get())
                 row["valid_icon"] = "✔️" if valid_count > 0 else "❌"
                 row["valid_count"] = valid_count
                 row["files_preview"] = ", ".join(preview) if preview else "(no files)"
+
+                # 7. Update the UI row
                 self.root.after(0, lambda i=idx: self._update_tree_row(i))
-                self.update_status(f"Resolved: {row['original_name']} -> {row['selected_name'] or row['suggested_name'] or '?'} {cov_icon} {row['valid_icon']}")
+                self.update_status(f"Resolved: {row['original_name']} -> {current_name or suggested or '?'} {cov_icon} {row['valid_icon']}")
         self.update_status("Rescanning selected rows...")
         threading.Thread(target=worker).start()
-
+    
     # ------------------------------------------------------------------
     # Add selected rows to Ludusavi
     # ------------------------------------------------------------------
