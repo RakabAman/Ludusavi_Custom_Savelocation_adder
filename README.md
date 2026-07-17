@@ -76,7 +76,7 @@ The table shows:
 
 ✓ – tick to select a row for adding.
 
-Cov – ✅ if the path is already covered, ❌ if new.
+Cov – ✅ if the path is already covered by manifest or exists in config as custom entry, ❌ if new.
 
 Val – ✔️ if the folder contains valid save files (after exclusions), ❌ if not.
 
@@ -84,7 +84,7 @@ Folder Path – the full path.
 
 Game Name (editable) – the resolved game name (double‑click to edit).
 
-Suggested – a close match if the folder name didn't resolve exactly.
+Suggested – a close match if the folder name didn't resolve exactly. 
 
 Sample Files – a preview of files inside the folder.
 
