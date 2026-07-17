@@ -1483,6 +1483,7 @@ class LudusaviGUI:
 
             exclude_enabled = self.exclude_patterns_enabled.get()
            
+
             if self.deep_scan_enabled.get():
                 # ---- DEEP SCAN ----
                 log("  Using deep scan")
@@ -1494,12 +1495,15 @@ class LudusaviGUI:
                         break
                     log(f"    Scanning saves in: {game_folder} (game: {game_name})")
 
-                    # --- NEW: collect subfolders and resolve names (if option enabled) ---
+                    # --- Collect subfolders and resolve names (if option enabled) ---
                     subfolder_map = {}
                     if self.deep_subfolder_resolution_enabled.get():
                         try:
                             for sub in game_folder.iterdir():
                                 if sub.is_dir():
+                                    # Skip if the subfolder is in the exclusion list
+                                    if self.exclude_folders_enabled.get() and sub.name.lower() in [x.lower() for x in self.excluded_folder_names]:
+                                        continue
                                     sub_resolved, sub_match, _ = self.resolve_game_name_extended(sub.name, sub)
                                     if sub_resolved and sub_resolved != game_name:
                                         subfolder_map[sub] = sub_resolved
@@ -1534,9 +1538,9 @@ class LudusaviGUI:
                             # Check coverage under the subfolder's resolved name
                             cov_icon_sub, _, _ = self.get_coverage_status(sub_resolved, norm_path)
                             if cov_icon_sub == "✅" or cov_icon_sub == "🟢":
-                                # Covered → use sub_resolved as selected, clear suggestion
+                                # Covered → use sub_resolved as selected, suggest original game_name
                                 selected_name = sub_resolved
-                                suggested_name = ""
+                                suggested_name = game_name
                             else:
                                 # Not covered → keep game_name, suggest sub_resolved
                                 selected_name = game_name
